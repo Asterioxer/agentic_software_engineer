@@ -6,7 +6,7 @@ from .change_analysis import analyze_diff
 from .domain import TaskSpec
 from .llm import build_advisor
 from .policy import ToolPolicy
-from .providers import PlanRequest
+from .providers import DeterministicProvider, PlanRequest
 from .runner import AgentRun
 from .security import SecurityHeadersMiddleware, allowed_origins
 from .tools import build_default_registry
@@ -45,5 +45,5 @@ def advisory(request:AdvisoryRequest)->dict[str,str]:
         text=provider.plan(PlanRequest(request.task,request.repository_context))
         return {"provider":name,"advisory":text}
     except Exception:
-        fallback=build_advisor()[0]
+        fallback=DeterministicProvider()
         return {"provider":"deterministic","advisory":fallback.plan(PlanRequest(request.task,request.repository_context))}
