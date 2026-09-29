@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.0 — Command Verification Boundary
+- Added structured allowlisted command execution.
+- Added shell=False, timeout and output-size boundaries.
+- Added sanitized execution environment.
+- Added independent verification pipeline and command evidence.
+- Wired verification evidence into the agent run result.
+- Added command execution and verification tests.
+
 ## 0.3.0 — Guarded Execution
 - Added bounded workspace execution primitives.
 - Added dry-run-by-default mutation semantics.
