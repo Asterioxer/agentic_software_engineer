@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.0 — Agentic Core
+- Added deterministic diff/change-risk analysis.
+- Added bounded reflection and retry-budget contracts.
+- Added provider abstraction with deterministic fallback.
+- Added GitHub workflow policy contracts requiring green verification before merge.
+- Added operator dashboard with live run submission and verification evidence.
+
 ## 0.4.0 — Command Verification Boundary
 - Added structured allowlisted command execution.
 - Added shell=False, timeout and output-size boundaries.

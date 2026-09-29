@@ -1,12 +1,10 @@
-export default function Home() {
-  return (
-    <main style={{ maxWidth: 960, margin: "0 auto", padding: "4rem 1.5rem", fontFamily: "system-ui" }}>
-      <p style={{ opacity: 0.65 }}>AGENTIC SOFTWARE ENGINEER · FOUNDATION</p>
-      <h1 style={{ fontSize: "3rem", marginBottom: "1rem" }}>Observe. Plan. Act. Verify.</h1>
-      <p style={{ fontSize: "1.2rem", lineHeight: 1.6, maxWidth: 720 }}>
-        A software-engineering agent built around explicit state, guarded tools,
-        independent verification, and auditable execution evidence.
-      </p>
-    </main>
-  );
+"use client";
+import { FormEvent, useState } from "react";
+type Verification={check:string;passed:boolean;detail:string};
+type RunResult={status:string;verification?:Verification[];events?:{status:string;message:string}[]};
+const API=process.env.NEXT_PUBLIC_API_URL??"http://localhost:8000";
+export default function Home(){
+ const[title,setTitle]=useState("Review a repository change"),[description,setDescription]=useState("Inspect the repository, plan a bounded implementation, and verify it."),[repository,setRepository]=useState(""),[result,setResult]=useState<RunResult|null>(null),[busy,setBusy]=useState(false);
+ async function submit(event:FormEvent){event.preventDefault();setBusy(true);try{const r=await fetch(API+"/api/v1/runs",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({task:{title,description,repository:repository||null}})});setResult(await r.json())}catch{setResult({status:"failed",events:[{status:"failed",message:"API unavailable. Start FastAPI or set NEXT_PUBLIC_API_URL."}]})}finally{setBusy(false)}}
+ return <main className="shell"><header><div className="eyebrow">AGENTIC SOFTWARE ENGINEER · CONTROL PLANE</div><h1>Observe. Plan. Act. Verify.</h1><p className="lede">Repository-aware engineering automation with explicit policy boundaries, bounded execution, and independent evidence.</p></header><section className="grid"><form className="panel" onSubmit={submit}><div className="panel-title">Start a run</div><label>Task<input value={title} onChange={e=>setTitle(e.target.value)}/></label><label>Description<textarea value={description} onChange={e=>setDescription(e.target.value)}/></label><label>Repository path<input value={repository} onChange={e=>setRepository(e.target.value)} placeholder="/workspace/repo"/></label><button disabled={busy}>{busy?"Running…":"Run guarded agent"}</button><p className="hint">Mutations are dry-run by default. Commands are allowlisted.</p></form><section className="panel"><div className="panel-title">Evidence</div>{!result?<div className="empty">No run yet. Submit a task to populate the audit trail.</div>:<><div className={"status "+result.status}>{result.status}</div><div className="checks">{(result.verification??[]).map(v=><div className="check" key={v.check}><span>{v.passed?"✓":"×"}</span><div><b>{v.check}</b><small>{v.detail}</small></div></div>)}</div><div className="timeline">{(result.events??[]).map((e,i)=><div key={i}><span>{e.status}</span>{e.message}</div>)}</div></>}</section></section></main>;
 }
