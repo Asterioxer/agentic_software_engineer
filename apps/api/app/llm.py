@@ -5,7 +5,7 @@ import os
 import urllib.request
 from dataclasses import dataclass
 
-from .providers import DeterministicProvider, PlanRequest
+from .providers import DeterministicProvider, PlanRequest, PlanningProvider
 
 @dataclass(frozen=True)
 class Advisory:
@@ -37,7 +37,7 @@ class OllamaProvider:
             data = json.loads(response.read().decode())
         return str(data.get("response", ""))
 
-def build_advisor() -> tuple[object, str]:
+def build_advisor() -> tuple[PlanningProvider, str]:
     base_url = os.getenv("OLLAMA_BASE_URL")
     model = os.getenv("OLLAMA_MODEL")
     if base_url and model:
