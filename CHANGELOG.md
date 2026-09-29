@@ -1,9 +1,14 @@
 # Changelog
 
+## 0.3.0 — Guarded Execution
+- Added bounded workspace execution primitives.
+- Added dry-run-by-default mutation semantics.
+- Added path traversal protection and action policy.
+- Added independent workspace verification.
+
 ## 0.2.1 — Context-Aware Planning
 - Wired repository inspection into the agent planning loop.
 - Added repository-context verification.
-- Preserved deterministic operation without an LLM.
 
 ## 0.2.0 — Repository Intelligence
 - Added bounded local repository inspection.
