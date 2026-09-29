@@ -21,19 +21,23 @@ def analyze_diff(diff: str) -> ChangeAnalysis:
     files: list[FileChange] = []
     current: str | None = None
     additions = deletions = 0
+
+    def flush() -> None:
+        nonlocal additions, deletions
+        if current is not None:
+            files.append(FileChange(current, additions, deletions, _file_risk(current, additions, deletions)))
+        additions = deletions = 0
+
     for line in diff.splitlines():
         if line.startswith("+++ b/"):
+            flush()
             current = line[6:]
-            additions = deletions = 0
         elif current and line.startswith("+") and not line.startswith("+++"):
             additions += 1
         elif current and line.startswith("-") and not line.startswith("---"):
             deletions += 1
-        if current and (line.startswith("diff --git ") or line.startswith("+++ b/")):
-            if line.startswith("+++ b/") and current:
-                risk = _file_risk(current, additions, deletions)
-                if not files or files[-1].path != current:
-                    files.append(FileChange(current, additions, deletions, risk))
+    flush()
+
     total_additions = sum(item.additions for item in files)
     total_deletions = sum(item.deletions for item in files)
     risk = "high" if any(item.risk == "high" for item in files) else "medium" if any(item.risk == "medium" for item in files) else "low"
