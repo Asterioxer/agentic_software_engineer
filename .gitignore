@@ -1,25 +1,12 @@
-# Python
 __pycache__/
 *.py[cod]
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
 .venv/
 .env
 .env.*
 !.env.example
-
-# Node
 node_modules/
 .next/
-out/
-coverage/
-
-# Runtime
-*.db
-*.sqlite
-
-# OS / IDE
+dist/
+build/
+*.log
 .DS_Store
-.idea/
-.vscode/
