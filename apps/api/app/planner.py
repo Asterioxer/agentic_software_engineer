@@ -1,18 +1,32 @@
 from __future__ import annotations
 
-from .domain import PlanStep, TaskSpec
+from typing import Any
+
+from .domain import PlanStep, StepStatus, TaskSpec
 
 
 def build_deterministic_plan(
-    task: TaskSpec, repository_summary: dict[str, object] | None = None
+    task: TaskSpec, repository_summary: dict[str, Any] | None = None
 ) -> list[PlanStep]:
-    steps = [
+    """Construct an inspectable, typed execution plan with explicit inputs and criteria."""
+    steps: list[PlanStep] = [
         PlanStep(
             id="understand",
             description=f"Normalize task intent: {task.title}",
+            tool=None,
+            inputs={
+                "title": task.title,
+                "description": task.description,
+                "constraints": task.constraints,
+            },
+            expected_outputs=["normalized_intent", "task_scope"],
+            validation_criteria=["Task title and description are bounded and validated."],
             success_criteria=["Concrete task intent exists."],
+            status=StepStatus.PENDING,
+            requires_approval=False,
         )
     ]
+
     if task.repository:
         count = repository_summary.get("file_count", 0) if repository_summary else 0
         steps.append(
@@ -20,29 +34,59 @@ def build_deterministic_plan(
                 id="inspect",
                 description=f"Inspect repository context ({count} indexed files).",
                 tool="repository.inspect",
+                inputs={"repository": task.repository, "query": task.title},
+                expected_outputs=["repository_metadata", "relevant_snippets", "languages"],
+                validation_criteria=["Repository context is bounded and accessible."],
                 success_criteria=["Repository context is bounded and available."],
+                status=StepStatus.PENDING,
+                requires_approval=False,
             )
         )
-    steps.extend(
-        [
-            PlanStep(
-                id="implement",
-                description="Plan the smallest necessary implementation change.",
-                tool="workspace.plan",
-                success_criteria=["Actions are explicit and bounded."],
-            ),
-            PlanStep(
-                id="verify",
-                description="Run independent verification.",
-                tool="verification.run",
-                success_criteria=["Mandatory checks pass."],
-            ),
-        ]
+
+    # Mutation step
+    is_real_mutation = not task.dry_run
+    steps.append(
+        PlanStep(
+            id="implement",
+            description="Execute bounded workspace mutation or dry-run plan.",
+            tool="workspace.plan",
+            inputs={
+                "repository": task.repository,
+                "dry_run": task.dry_run,
+                "kind": "write",
+                "path": "agent-plan.txt",
+                "content": f"# Plan: {task.title}\n\n{task.description}\n",
+            },
+            expected_outputs=["action_result", "mutation_status"],
+            validation_criteria=[
+                "Action paths stay within workspace boundary.",
+                "Action kind is allowlisted.",
+            ],
+            success_criteria=["Actions are explicit and bounded."],
+            status=StepStatus.PENDING,
+            requires_approval=is_real_mutation and not task.auto_approve,
+        )
     )
+
+    # Independent verification step
+    steps.append(
+        PlanStep(
+            id="verify",
+            description="Run independent deterministic checks.",
+            tool="verification.run",
+            inputs={"repository": task.repository, "expected_files": []},
+            expected_outputs=["verification_evidence", "gate_status"],
+            validation_criteria=["All verification gates evaluate to true."],
+            success_criteria=["Mandatory checks pass."],
+            status=StepStatus.PENDING,
+            requires_approval=False,
+        )
+    )
+
     return steps
 
 
-def plan_with_repository(task: TaskSpec) -> tuple[list[PlanStep], dict[str, object] | None]:
+def plan_with_repository(task: TaskSpec) -> tuple[list[PlanStep], dict[str, Any] | None]:
     if not task.repository:
         return build_deterministic_plan(task), None
     from .repository_service import summarize_repository

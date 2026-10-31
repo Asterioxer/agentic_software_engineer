@@ -9,11 +9,31 @@ from pydantic import BaseModel, ConfigDict, Field
 class RunStatus(str, Enum):
     INTAKE = "intake"
     PLANNING = "planning"
+    AWAITING_APPROVAL = "awaiting_approval"
     EXECUTING = "executing"
     VERIFYING = "verifying"
     REFLECTING = "reflecting"
     COMPLETED = "completed"
     FAILED = "failed"
+    PAUSED = "paused"
+
+
+class StepStatus(str, Enum):
+    PENDING = "pending"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    SKIPPED = "skipped"
+
+
+class FailureCategory(str, Enum):
+    POLICY_VIOLATION = "policy_violation"
+    VALIDATION_FAILURE = "validation_failure"
+    EXECUTION_ERROR = "execution_error"
+    TIMEOUT = "timeout"
+    DEPENDENCY_MISSING = "dependency_missing"
+    SYNTAX_ERROR = "syntax_error"
+    UNKNOWN = "unknown"
 
 
 class TaskSpec(BaseModel):
@@ -23,13 +43,23 @@ class TaskSpec(BaseModel):
     description: str = Field(min_length=1, max_length=10_000)
     repository: str | None = Field(default=None, max_length=500)
     constraints: list[str] = Field(default_factory=list, max_length=30)
+    dry_run: bool = Field(default=True)
+    auto_approve: bool = Field(default=False)
+    max_retries: int = Field(default=2, ge=0, le=10)
 
 
 class PlanStep(BaseModel):
     id: str
     description: str
     tool: str | None = None
+    inputs: dict[str, Any] = Field(default_factory=dict)
+    expected_outputs: list[str] = Field(default_factory=list)
+    validation_criteria: list[str] = Field(default_factory=list)
     success_criteria: list[str] = Field(default_factory=list)
+    status: StepStatus = Field(default=StepStatus.PENDING)
+    output: dict[str, Any] | None = None
+    error: str | None = None
+    requires_approval: bool = False
 
 
 class ToolCall(BaseModel):
@@ -47,3 +77,38 @@ class RunEvent(BaseModel):
     sequence: int
     status: RunStatus
     message: str
+    timestamp: str | None = None
+
+
+class FailureDiagnosis(BaseModel):
+    category: FailureCategory
+    message: str
+    recoverable: bool
+    suggested_recovery: str
+
+
+class EvidenceRecord(BaseModel):
+    source: str
+    category: str
+    summary: str
+    passed: bool
+    data: dict[str, Any] = Field(default_factory=dict)
+    timestamp: str | None = None
+
+
+class RunCheckpoint(BaseModel):
+    run_id: str
+    task: TaskSpec
+    plan: list[PlanStep] = Field(default_factory=list)
+    current_step_index: int = 0
+    status: RunStatus = RunStatus.INTAKE
+    retry_count: int = 0
+    max_retries: int = 2
+    events: list[RunEvent] = Field(default_factory=list)
+    tool_results: list[dict[str, Any]] = Field(default_factory=list)
+    verification: list[VerificationResult] = Field(default_factory=list)
+    evidence_records: list[EvidenceRecord] = Field(default_factory=list)
+    repository_summary: dict[str, Any] | None = None
+    failure_diagnosis: FailureDiagnosis | None = None
+    created_at: str | None = None
+    updated_at: str | None = None
