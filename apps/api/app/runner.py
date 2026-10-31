@@ -1,12 +1,18 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import uuid
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from .domain import (
     EvidenceRecord,
     FailureCategory,
     FailureDiagnosis,
+    JournalOperation,
+    OperationState,
     RunCheckpoint,
     RunEvent,
     RunStatus,
@@ -15,6 +21,7 @@ from .domain import (
     ToolCall,
     VerificationResult,
 )
+from .execution import WorkspaceAction, WorkspaceExecutor, compute_file_hash
 from .planner import plan_with_repository
 from .policy import ToolPolicy
 from .reflection import classify_failure, reflect
@@ -23,7 +30,7 @@ from .tools import ToolRegistry
 
 
 class AgentRun:
-    """Resilient, auditable control-plane runner with persistent checkpoint recovery."""
+    """Resilient, auditable control-plane runner with persistent checkpoint recovery and operation journaling."""
 
     def __init__(
         self,
@@ -72,10 +79,72 @@ class AgentRun:
         self.checkpoint.evidence_records = list(self.evidence_records)
         self.store.save_checkpoint(self.checkpoint)
 
+    def _reconcile_interrupted_operations(self) -> bool:
+        """Scan and reconcile any operations that were interrupted mid-flight.
+
+        Returns True if clean/reconciled, False if manual reconciliation is required.
+        """
+        interrupted = self.store.mark_interrupted_operations(self.run_id)
+        for op in interrupted:
+            self._emit(
+                RunStatus.REFLECTING,
+                f"Interrupted operation {op.operation_id} (step '{op.step_id}') detected. Performing reconciliation...",
+            )
+            # File mutation reconciliation
+            if op.tool == "workspace.plan" and op.precondition_hash and op.postcondition_hash:
+                repo_path = self.task.repository or "."
+                file_rel = str(op.inputs.get("path", "agent-plan.txt"))
+                try:
+                    target = (Path(repo_path) / file_rel).resolve()
+                    current_hash = compute_file_hash(target)
+                except (OSError, ValueError) as exc:
+                    self._emit(
+                        RunStatus.RECONCILIATION_REQUIRED, f"Failed to check target file: {exc}"
+                    )
+                    return False
+
+                if current_hash == op.postcondition_hash:
+                    self.store.update_operation_state(
+                        op.operation_id,
+                        OperationState.SUCCEEDED,
+                        recovery_status="reconciled_from_postcondition",
+                    )
+                    self._emit(
+                        RunStatus.REFLECTING,
+                        f"Operation {op.operation_id} reconciled: disk matches postcondition hash.",
+                    )
+                elif current_hash == op.precondition_hash:
+                    self.store.update_operation_state(
+                        op.operation_id,
+                        OperationState.PENDING,
+                        recovery_status="unapplied_clean_precondition",
+                    )
+                    self._emit(
+                        RunStatus.REFLECTING,
+                        f"Operation {op.operation_id} clean: disk matches precondition hash (unapplied).",
+                    )
+                else:
+                    self.store.update_operation_state(
+                        op.operation_id,
+                        OperationState.RECONCILIATION_REQUIRED,
+                        recovery_status="hash_diverged_from_expected",
+                    )
+                    self._emit(
+                        RunStatus.RECONCILIATION_REQUIRED,
+                        f"Fatal reconciliation divergence for operation {op.operation_id} on {file_rel}. Manual intervention required.",
+                    )
+                    return False
+        return True
+
     def execute(self, auto_approved: bool = False) -> dict[str, object]:
         if not self.events:
             self._emit(RunStatus.INTAKE, "Task accepted.")
             self._save_checkpoint()
+
+        # Step 0: Crash reconciliation check
+        if not self._reconcile_interrupted_operations():
+            self._save_checkpoint()
+            return self._build_response(RunStatus.RECONCILIATION_REQUIRED)
 
         # Step 1: Planning (or restoring existing plan)
         if not self.checkpoint.plan:
@@ -142,6 +211,73 @@ class AgentRun:
                 self._save_checkpoint()
                 return self._build_response(RunStatus.FAILED)
 
+            # Idempotency check via Operation Journal
+            input_hash = hashlib.sha256(json.dumps(tool_args, sort_keys=True).encode()).hexdigest()[
+                :16
+            ]
+            idempotency_key = hashlib.sha256(
+                f"{self.run_id}:{step.id}:{input_hash}".encode()
+            ).hexdigest()[:16]
+
+            existing_op = self.store.get_operation_by_idempotency_key(idempotency_key)
+            if existing_op and existing_op.state == OperationState.SUCCEEDED:
+                self._emit(
+                    RunStatus.EXECUTING,
+                    f"Step '{step.id}' skipped: operation {existing_op.operation_id} already succeeded (idempotent replay).",
+                )
+                if existing_op.result:
+                    step.output = existing_op.result
+                    self.tool_results.append({"tool": step.tool, "result": existing_op.result})
+                step.status = StepStatus.COMPLETED
+                self._save_checkpoint()
+                continue
+
+            if existing_op and existing_op.state == OperationState.RECONCILIATION_REQUIRED:
+                self._emit(
+                    RunStatus.RECONCILIATION_REQUIRED,
+                    f"Step '{step.id}' is blocked: operation {existing_op.operation_id} requires manual reconciliation.",
+                )
+                self._save_checkpoint()
+                return self._build_response(RunStatus.RECONCILIATION_REQUIRED)
+
+            # Pre-compute condition hashes for workspace mutations
+            pre_hash = None
+            post_hash = None
+            if step.tool == "workspace.plan":
+                repo_root = str(self.task.repository or ".")
+                temp_executor = WorkspaceExecutor(
+                    repo_root, dry_run=bool(tool_args.get("dry_run", True))
+                )
+                try:
+                    pre_hash, post_hash = temp_executor.compute_conditions(
+                        WorkspaceAction(
+                            kind=str(tool_args.get("kind", "write")),
+                            path=str(tool_args.get("path", "agent-plan.txt")),
+                            content=tool_args.get("content", ""),
+                        )
+                    )
+                except (OSError, ValueError):
+                    pre_hash = post_hash = None
+
+            # Create durable Operation Journal record (PREPARED state)
+            op_id = uuid.uuid4().hex[:12]
+            journal_op = JournalOperation(
+                operation_id=op_id,
+                run_id=self.run_id,
+                step_id=step.id,
+                idempotency_key=idempotency_key,
+                tool=step.tool,
+                input_hash=input_hash,
+                inputs=tool_args,
+                precondition_hash=pre_hash,
+                postcondition_hash=post_hash,
+                state=OperationState.PREPARED,
+                execution_attempt=existing_op.execution_attempt + 1 if existing_op else 1,
+                started_at=datetime.now(UTC).isoformat(),
+            )
+            self.store.create_operation(journal_op)
+            self.store.update_operation_state(op_id, state=OperationState.RUNNING)
+
             # Execute tool with bounded error handling and retries
             step_passed = False
             while not step_passed and self.retry_count <= self.max_retries:
@@ -162,10 +298,27 @@ class AgentRun:
 
                     step.status = StepStatus.COMPLETED
                     step_passed = True
+
+                    # Update Operation Journal to SUCCEEDED
+                    self.store.update_operation_state(
+                        op_id,
+                        state=OperationState.SUCCEEDED,
+                        result=result,
+                        postcondition_hash=result.get("postcondition_hash") or post_hash,
+                        completed_at=datetime.now(UTC).isoformat(),
+                    )
                 except (OSError, ValueError, KeyError, RuntimeError) as exc:
                     diagnosis = classify_failure(str(exc), step_output=step.output)
                     self.checkpoint.failure_diagnosis = diagnosis
                     step.error = str(exc)
+
+                    # Update Operation Journal to FAILED
+                    self.store.update_operation_state(
+                        op_id,
+                        state=OperationState.FAILED,
+                        error=str(exc),
+                        completed_at=datetime.now(UTC).isoformat(),
+                    )
 
                     if diagnosis.recoverable and self.retry_count < self.max_retries:
                         self.retry_count += 1
@@ -207,10 +360,10 @@ class AgentRun:
             None,
         )
         if isinstance(verification_tool, dict):
+            raw_checks = verification_tool.get("checks")
+            checks_list: list[Any] = raw_checks if isinstance(raw_checks, list) else []
             results.extend(
-                VerificationResult(**item)
-                for item in verification_tool.get("checks", [])
-                if isinstance(item, dict)
+                VerificationResult(**item) for item in checks_list if isinstance(item, dict)
             )
 
         self.checkpoint.verification = results
@@ -240,9 +393,11 @@ class AgentRun:
             "verification": [v.model_dump() for v in self.checkpoint.verification],
             "events": [e.model_dump() for e in self.events],
             "evidence_records": [r.model_dump() for r in self.evidence_records],
-            "failure_diagnosis": self.checkpoint.failure_diagnosis.model_dump()
-            if self.checkpoint.failure_diagnosis
-            else None,
+            "failure_diagnosis": (
+                self.checkpoint.failure_diagnosis.model_dump()
+                if self.checkpoint.failure_diagnosis
+                else None
+            ),
             "checkpoint": self.checkpoint.model_dump(),
         }
 

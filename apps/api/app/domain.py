@@ -16,6 +16,7 @@ class RunStatus(str, Enum):
     COMPLETED = "completed"
     FAILED = "failed"
     PAUSED = "paused"
+    RECONCILIATION_REQUIRED = "reconciliation_required"
 
 
 class StepStatus(str, Enum):
@@ -26,6 +27,17 @@ class StepStatus(str, Enum):
     SKIPPED = "skipped"
 
 
+class OperationState(str, Enum):
+    PENDING = "pending"
+    PREPARED = "prepared"
+    RUNNING = "running"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    INTERRUPTED = "interrupted"
+    RECONCILIATION_REQUIRED = "reconciliation_required"
+    CANCELLED = "cancelled"
+
+
 class FailureCategory(str, Enum):
     POLICY_VIOLATION = "policy_violation"
     VALIDATION_FAILURE = "validation_failure"
@@ -33,6 +45,7 @@ class FailureCategory(str, Enum):
     TIMEOUT = "timeout"
     DEPENDENCY_MISSING = "dependency_missing"
     SYNTAX_ERROR = "syntax_error"
+    RECOVERY_REQUIRED = "recovery_required"
     UNKNOWN = "unknown"
 
 
@@ -60,6 +73,27 @@ class PlanStep(BaseModel):
     output: dict[str, Any] | None = None
     error: str | None = None
     requires_approval: bool = False
+
+
+class JournalOperation(BaseModel):
+    operation_id: str
+    run_id: str
+    step_id: str
+    idempotency_key: str
+    tool: str
+    input_hash: str
+    inputs: dict[str, Any] = Field(default_factory=dict)
+    precondition_hash: str | None = None
+    postcondition_hash: str | None = None
+    state: OperationState = Field(default=OperationState.PENDING)
+    execution_attempt: int = Field(default=1, ge=1)
+    result: dict[str, Any] | None = None
+    error: str | None = None
+    recovery_status: str | None = None
+    started_at: str | None = None
+    completed_at: str | None = None
+    created_at: str | None = None
+    updated_at: str | None = None
 
 
 class ToolCall(BaseModel):

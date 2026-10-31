@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from .domain import EvidenceRecord, RunCheckpoint, RunEvent
+from .domain import EvidenceRecord, JournalOperation, OperationState, RunCheckpoint, RunEvent
 
 
 def _utc_now_iso() -> str:
@@ -15,7 +15,7 @@ def _utc_now_iso() -> str:
 
 
 class RunStore:
-    """Thread-safe SQLite store for run checkpoints, timeline events, and audit evidence."""
+    """Thread-safe SQLite store for run checkpoints, operation journal, and audit evidence."""
 
     def __init__(self, db_path: str | None = None) -> None:
         if db_path is None:
@@ -30,6 +30,8 @@ class RunStore:
     def _get_connection(self) -> sqlite3.Connection:
         conn = sqlite3.connect(str(self.db_path), timeout=15.0)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute("PRAGMA busy_timeout=5000;")
         return conn
 
     def _init_db(self) -> None:
@@ -69,7 +71,35 @@ class RunStore:
                     timestamp TEXT NOT NULL
                 )
             """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS operations (
+                    operation_id TEXT PRIMARY KEY,
+                    run_id TEXT NOT NULL,
+                    step_id TEXT NOT NULL,
+                    idempotency_key TEXT NOT NULL UNIQUE,
+                    tool TEXT NOT NULL,
+                    input_hash TEXT NOT NULL,
+                    precondition_hash TEXT,
+                    postcondition_hash TEXT,
+                    state TEXT NOT NULL,
+                    execution_attempt INTEGER NOT NULL DEFAULT 1,
+                    inputs_json TEXT NOT NULL,
+                    result_json TEXT,
+                    error TEXT,
+                    recovery_status TEXT,
+                    started_at TEXT,
+                    completed_at TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_ops_run_id ON operations(run_id);")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_ops_idempotency ON operations(idempotency_key);"
+            )
             conn.commit()
+
+    # --- Run Checkpoint APIs ---
 
     def save_checkpoint(self, checkpoint: RunCheckpoint) -> None:
         now = _utc_now_iso()
@@ -155,6 +185,170 @@ class RunStore:
                 ),
             )
             conn.commit()
+
+    # --- Operation Journal APIs ---
+
+    def create_operation(self, op: JournalOperation) -> None:
+        now = _utc_now_iso()
+        created = op.created_at or now
+        updated = op.updated_at or now
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO operations (
+                    operation_id, run_id, step_id, idempotency_key, tool, input_hash,
+                    precondition_hash, postcondition_hash, state, execution_attempt,
+                    inputs_json, result_json, error, recovery_status, started_at,
+                    completed_at, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(idempotency_key) DO UPDATE SET
+                    execution_attempt = operations.execution_attempt + 1,
+                    state = excluded.state,
+                    updated_at = excluded.updated_at
+            """,
+                (
+                    op.operation_id,
+                    op.run_id,
+                    op.step_id,
+                    op.idempotency_key,
+                    op.tool,
+                    op.input_hash,
+                    op.precondition_hash,
+                    op.postcondition_hash,
+                    op.state.value,
+                    op.execution_attempt,
+                    json.dumps(op.inputs),
+                    json.dumps(op.result) if op.result else None,
+                    op.error,
+                    op.recovery_status,
+                    op.started_at,
+                    op.completed_at,
+                    created,
+                    updated,
+                ),
+            )
+            conn.commit()
+
+    def update_operation_state(
+        self,
+        operation_id: str,
+        state: OperationState,
+        result: dict[str, Any] | None = None,
+        error: str | None = None,
+        postcondition_hash: str | None = None,
+        recovery_status: str | None = None,
+        completed_at: str | None = None,
+    ) -> None:
+        now = _utc_now_iso()
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                UPDATE operations SET
+                    state = ?,
+                    result_json = CASE WHEN ? IS NOT NULL THEN ? ELSE result_json END,
+                    error = CASE WHEN ? IS NOT NULL THEN ? ELSE error END,
+                    postcondition_hash = CASE WHEN ? IS NOT NULL THEN ? ELSE postcondition_hash END,
+                    recovery_status = CASE WHEN ? IS NOT NULL THEN ? ELSE recovery_status END,
+                    completed_at = CASE WHEN ? IS NOT NULL THEN ? ELSE completed_at END,
+                    updated_at = ?
+                WHERE operation_id = ?
+            """,
+                (
+                    state.value,
+                    json.dumps(result) if result is not None else None,
+                    json.dumps(result) if result is not None else None,
+                    error,
+                    error,
+                    postcondition_hash,
+                    postcondition_hash,
+                    recovery_status,
+                    recovery_status,
+                    completed_at or now,
+                    completed_at or now,
+                    now,
+                    operation_id,
+                ),
+            )
+            conn.commit()
+
+    def get_operation(self, operation_id: str) -> JournalOperation | None:
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                "SELECT * FROM operations WHERE operation_id = ?", (operation_id,)
+            )
+            row = cursor.fetchone()
+            if not row:
+                return None
+            return self._row_to_operation(row)
+
+    def get_operation_by_idempotency_key(self, idempotency_key: str) -> JournalOperation | None:
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                "SELECT * FROM operations WHERE idempotency_key = ?", (idempotency_key,)
+            )
+            row = cursor.fetchone()
+            if not row:
+                return None
+            return self._row_to_operation(row)
+
+    def list_operations_for_run(self, run_id: str) -> list[JournalOperation]:
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                "SELECT * FROM operations WHERE run_id = ? ORDER BY created_at ASC", (run_id,)
+            )
+            rows = cursor.fetchall()
+            return [self._row_to_operation(row) for row in rows]
+
+    def mark_interrupted_operations(self, run_id: str) -> list[JournalOperation]:
+        """Scan for operations that were left in PREPARED or RUNNING and mark them INTERRUPTED."""
+        now = _utc_now_iso()
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                """
+                SELECT operation_id FROM operations
+                WHERE run_id = ? AND state IN ('prepared', 'running')
+            """,
+                (run_id,),
+            )
+            ids = [row["operation_id"] for row in cursor.fetchall()]
+            if ids:
+                placeholders = ",".join("?" * len(ids))
+                conn.execute(
+                    f"""
+                    UPDATE operations
+                    SET state = 'interrupted',
+                        recovery_status = 'detected_unclean_termination',
+                        updated_at = ?
+                    WHERE operation_id IN ({placeholders})
+                """,
+                    [now, *ids],
+                )
+                conn.commit()
+
+        return [op for op_id in ids if (op := self.get_operation(op_id))]
+
+    @staticmethod
+    def _row_to_operation(row: sqlite3.Row) -> JournalOperation:
+        return JournalOperation(
+            operation_id=row["operation_id"],
+            run_id=row["run_id"],
+            step_id=row["step_id"],
+            idempotency_key=row["idempotency_key"],
+            tool=row["tool"],
+            input_hash=row["input_hash"],
+            precondition_hash=row["precondition_hash"],
+            postcondition_hash=row["postcondition_hash"],
+            state=OperationState(row["state"]),
+            execution_attempt=row["execution_attempt"],
+            inputs=json.loads(row["inputs_json"]) if row["inputs_json"] else {},
+            result=json.loads(row["result_json"]) if row["result_json"] else None,
+            error=row["error"],
+            recovery_status=row["recovery_status"],
+            started_at=row["started_at"],
+            completed_at=row["completed_at"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
 
 
 _default_store: RunStore | None = None
