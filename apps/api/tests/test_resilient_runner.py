@@ -28,7 +28,9 @@ def test_agent_run_pauses_for_approval_when_mutating(tmp_path: Path) -> None:
     run_id = str(result["run_id"])
 
     # Now resume with explicit operator approval
-    resumed_result = resume_run(run_id, approved=True, registry=registry, policy=policy, store=store)
+    resumed_result = resume_run(
+        run_id, approved=True, registry=registry, policy=policy, store=store
+    )
     assert resumed_result["status"] == RunStatus.COMPLETED.value
     assert (tmp_path / "agent-plan.txt").exists()
 
@@ -56,5 +58,7 @@ def test_agent_run_does_not_repeat_completed_steps_on_resume(tmp_path: Path) -> 
     assert checkpoint.plan[0].status.value == "completed"
 
     # Resume and verify completion
-    res2 = resume_run(str(res1["run_id"]), approved=True, registry=registry, policy=policy, store=store)
+    res2 = resume_run(
+        str(res1["run_id"]), approved=True, registry=registry, policy=policy, store=store
+    )
     assert res2["status"] == RunStatus.COMPLETED.value

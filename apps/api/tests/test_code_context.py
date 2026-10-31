@@ -26,11 +26,7 @@ def test_sanitize_code_context_defangs_prompt_injection() -> None:
 
 
 def test_extract_python_symbols() -> None:
-    code = (
-        "class OrderService:\n"
-        "    def process(self): pass\n"
-        "def calculate_total(): pass\n"
-    )
+    code = "class OrderService:\n    def process(self): pass\ndef calculate_total(): pass\n"
     symbols = extract_python_symbols(code)
     assert "class OrderService" in symbols
     assert "def calculate_total" in symbols

@@ -26,10 +26,20 @@ class CommandResult:
 
 
 class CommandPolicy:
+    """Allowlist of structured commands.
+
+    SAFETY WARNING:
+    Application-level command filter using shell=False.
+    This does NOT provide OS-level process virtualization or container sandboxing.
+    """
+
     ALLOWED: ClassVar[dict[str, tuple[str, ...]]] = {
         "python.tests": ("python", "-m", "pytest"),
         "python.compile": ("python", "-m", "compileall"),
         "git.diff.check": ("git", "diff", "--check"),
+        "git.status": ("git", "status", "--short"),
+        "git.diff": ("git", "diff"),
+        "python.ruff": ("python", "-m", "ruff", "check"),
     }
     MAX_TIMEOUT = 60.0
     MAX_OUTPUT_BYTES = 32_000
@@ -46,7 +56,7 @@ class CommandPolicy:
 
 
 class CommandRunner:
-    """Runs only structured, allowlisted commands inside the repository root."""
+    """Runs allowlisted structured commands inside the repository root with resource limits."""
 
     def __init__(self, root: str, policy: CommandPolicy | None = None) -> None:
         self.root = Path(root).resolve()
@@ -64,16 +74,21 @@ class CommandRunner:
         if timeout <= 0:
             raise ValueError("Command timeout must be positive.")
         spec = self.policy.resolve(command_id, extra_args)
-        env = {
+
+        # Filtered environment: disallow passing ambient credentials, tokens, or arbitrary env
+        safe_env = {
             "PATH": os.environ.get("PATH", ""),
             "HOME": str(self.root),
             "PYTHONUNBUFFERED": "1",
+            "SYSTEMROOT": os.environ.get("SYSTEMROOT", "C:\\Windows"),
+            "COMSPEC": os.environ.get("COMSPEC", ""),
         }
+
         try:
             completed = subprocess.run(
                 list(spec.argv),
                 cwd=self.root,
-                env=env,
+                env=safe_env,
                 shell=False,
                 capture_output=True,
                 timeout=timeout,
@@ -88,6 +103,7 @@ class CommandRunner:
             exit_code = None
             stdout = (exc.stdout or b"")[: self.policy.MAX_OUTPUT_BYTES]
             stderr = (exc.stderr or b"")[: self.policy.MAX_OUTPUT_BYTES]
+
         stdout_text = (
             stdout.decode("utf-8", errors="replace") if isinstance(stdout, bytes) else str(stdout)
         )
