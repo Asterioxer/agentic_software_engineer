@@ -42,7 +42,7 @@ class RunRequest(BaseModel):
 
 
 class ResumeRequest(BaseModel):
-    approved: bool = Field(default=True)
+    approved: bool = Field(default=False)
 
 
 class DiffRequest(BaseModel):

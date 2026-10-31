@@ -49,8 +49,21 @@ class WorkspaceExecutor:
         if "\0" in relative_path:
             raise ValueError("Path contains null bytes.")
 
-        # Disallow Windows drive prefixes or root overrides in relative paths
         clean_rel = relative_path.replace("\\", "/").strip()
+
+        # Reject UNC paths (e.g. //server/share)
+        if clean_rel.startswith(("//", "\\\\")):
+            raise ValueError("UNC paths are not permitted.")
+
+        # Reject Windows drive letter prefixes (e.g. C:, D:)
+        if len(clean_rel) > 1 and clean_rel[1] == ":":
+            raise ValueError("Absolute drive paths are not permitted.")
+
+        # Reject NTFS alternate data streams (e.g. file.txt:stream)
+        if ":" in clean_rel:
+            raise ValueError("Alternate data streams are not permitted.")
+
+        # Disallow root overrides
         if clean_rel.startswith(("/", "\\")):
             clean_rel = clean_rel.lstrip("/\\")
 
@@ -65,7 +78,12 @@ class WorkspaceExecutor:
         # Disallow sensitive VCS/environment internals directly
         forbidden_parts = {".git", ".env"}
         rel_parts = target.relative_to(self.root).parts
-        if any(part in forbidden_parts for part in rel_parts):
+        if any(
+            part in forbidden_parts
+            or part.startswith((".git", ".env"))
+            or part.lower() in forbidden_parts
+            for part in rel_parts
+        ):
             raise ValueError(
                 "Direct modification of VCS internals or environment files is forbidden."
             )

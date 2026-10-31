@@ -56,11 +56,29 @@ class CommandPolicy:
 
 
 class CommandRunner:
-    """Runs allowlisted structured commands inside the repository root with resource limits."""
+    """Runs allowlisted structured commands inside the repository root with process tree cleanup."""
 
     def __init__(self, root: str, policy: CommandPolicy | None = None) -> None:
         self.root = Path(root).resolve()
         self.policy = policy or CommandPolicy()
+
+    def _kill_process_tree(self, proc: subprocess.Popen[bytes]) -> None:
+        """Safely terminate child process and all descendants on timeout."""
+        try:
+            if os.name == "nt":
+                subprocess.run(
+                    ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                    capture_output=True,
+                    check=False,
+                )
+            else:
+                proc.kill()
+        except OSError:
+            pass
+        try:
+            proc.kill()
+        except OSError:
+            pass
 
     def run(
         self,
@@ -84,25 +102,31 @@ class CommandRunner:
             "COMSPEC": os.environ.get("COMSPEC", ""),
         }
 
+        proc = subprocess.Popen(
+            list(spec.argv),
+            cwd=self.root,
+            env=safe_env,
+            shell=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+
         try:
-            completed = subprocess.run(
-                list(spec.argv),
-                cwd=self.root,
-                env=safe_env,
-                shell=False,
-                capture_output=True,
-                timeout=timeout,
-                check=False,
-            )
+            stdout_bytes, stderr_bytes = proc.communicate(timeout=timeout)
             timed_out = False
-            exit_code = completed.returncode
-            stdout = completed.stdout[: self.policy.MAX_OUTPUT_BYTES]
-            stderr = completed.stderr[: self.policy.MAX_OUTPUT_BYTES]
-        except subprocess.TimeoutExpired as exc:
+            exit_code = proc.returncode
+            stdout = stdout_bytes[: self.policy.MAX_OUTPUT_BYTES]
+            stderr = stderr_bytes[: self.policy.MAX_OUTPUT_BYTES]
+        except subprocess.TimeoutExpired:
             timed_out = True
             exit_code = None
-            stdout = (exc.stdout or b"")[: self.policy.MAX_OUTPUT_BYTES]
-            stderr = (exc.stderr or b"")[: self.policy.MAX_OUTPUT_BYTES]
+            self._kill_process_tree(proc)
+            try:
+                stdout_bytes, stderr_bytes = proc.communicate(timeout=2.0)
+            except subprocess.TimeoutExpired:
+                stdout_bytes, stderr_bytes = b"", b""
+            stdout = stdout_bytes[: self.policy.MAX_OUTPUT_BYTES]
+            stderr = stderr_bytes[: self.policy.MAX_OUTPUT_BYTES]
 
         stdout_text = (
             stdout.decode("utf-8", errors="replace") if isinstance(stdout, bytes) else str(stdout)

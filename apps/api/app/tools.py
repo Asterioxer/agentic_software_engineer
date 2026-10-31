@@ -3,9 +3,9 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from .code_context import retrieve_relevant_context
 from .command_runner import CommandRunner
@@ -18,33 +18,40 @@ ToolHandler = Callable[[dict[str, Any]], dict[str, Any]]
 
 
 class RepositoryInspectArgs(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-    repository: str | None = None
-    query: str = ""
+    model_config = ConfigDict(extra="forbid")
+    repository: str | None = Field(default=None, max_length=500)
+    query: str = Field(default="", max_length=1000)
     max_files: int = Field(default=500, ge=1, le=1000)
 
 
 class WorkspacePlanArgs(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-    repository: str | None = None
+    model_config = ConfigDict(extra="forbid")
+    repository: str | None = Field(default=None, max_length=500)
     dry_run: bool = True
-    kind: str = Field(default="write")
-    path: str = Field(default="agent-plan.txt")
-    content: str | None = None
+    kind: Literal["write", "delete"] = Field(default="write")
+    path: str = Field(default="agent-plan.txt", min_length=1, max_length=500)
+    content: str | None = Field(default=None, max_length=100_000)
 
 
 class CommandRunArgs(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-    repository: str | None = None
-    command_id: str = "git.diff.check"
-    extra_args: list[str] = Field(default_factory=list)
+    model_config = ConfigDict(extra="forbid")
+    repository: str | None = Field(default=None, max_length=500)
+    command_id: Literal[
+        "python.tests",
+        "python.compile",
+        "git.diff.check",
+        "git.status",
+        "git.diff",
+        "python.ruff",
+    ] = "git.diff.check"
+    extra_args: list[str] = Field(default_factory=list, max_length=20)
     timeout_seconds: float = Field(default=30.0, ge=1.0, le=60.0)
 
 
 class VerificationRunArgs(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-    repository: str | None = None
-    expected_files: list[str] = Field(default_factory=list)
+    model_config = ConfigDict(extra="forbid")
+    repository: str | None = Field(default=None, max_length=500)
+    expected_files: list[str] = Field(default_factory=list, max_length=50)
 
 
 @dataclass(frozen=True)
@@ -72,14 +79,26 @@ class ToolRegistry:
     def execute_guarded(
         self, name: str, args: dict[str, Any]
     ) -> tuple[dict[str, Any], EvidenceRecord]:
-        """Validate input arguments schema, execute tool, and produce structured evidence record."""
+        """Validate input arguments against strict schema, execute tool, and return structured evidence."""
         tool = self.get(name)
         start_time = time.monotonic()
 
         validated_args = args
         if tool.input_schema:
-            validated_obj = tool.input_schema.model_validate(args)
-            validated_args = validated_obj.model_dump()
+            try:
+                validated_obj = tool.input_schema.model_validate(args)
+                validated_args = validated_obj.model_dump()
+            except ValidationError as exc:
+                duration_ms = round((time.monotonic() - start_time) * 1000, 2)
+                err_msg = f"Tool '{name}' argument validation failed: {exc}"
+                record = EvidenceRecord(
+                    source=name,
+                    category="tool_validation_failure",
+                    summary=err_msg,
+                    passed=False,
+                    data={"args": args, "duration_ms": duration_ms},
+                )
+                raise ValueError(err_msg) from exc
 
         result = tool.handler(validated_args)
         duration_ms = round((time.monotonic() - start_time) * 1000, 2)
