@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+from dataclasses import asdict
+from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
@@ -8,6 +11,7 @@ from pydantic import BaseModel, Field
 
 from .change_analysis import analyze_diff
 from .domain import TaskSpec
+from .evaluation import IndependentEvaluator
 from .llm import build_advisor
 from .policy import ToolPolicy
 from .providers import DeterministicProvider, PlanRequest
@@ -110,3 +114,20 @@ def advisory(request: AdvisoryRequest) -> dict[str, str]:
             "provider": "deterministic",
             "advisory": fallback.plan(PlanRequest(request.task, request.repository_context)),
         }
+
+
+@app.post("/api/v1/evaluations/run")
+def run_evaluations() -> dict[str, Any]:
+    evaluator = IndependentEvaluator()
+    report = evaluator.run_all()
+    result: dict[str, Any] = asdict(report)
+    return result
+
+
+@app.get("/api/v1/evaluations/latest")
+def get_latest_evaluation() -> dict[str, Any]:
+    report_file = Path("evaluation_reports/evaluation_report.json")
+    if not report_file.exists():
+        raise HTTPException(status_code=404, detail="No evaluation report generated yet.")
+    data: dict[str, Any] = json.loads(report_file.read_text(encoding="utf-8"))
+    return data

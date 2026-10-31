@@ -15,13 +15,17 @@ def test_path_null_bytes_rejected(tmp_path: Path) -> None:
 
 def test_modifying_git_internals_rejected(tmp_path: Path) -> None:
     executor = WorkspaceExecutor(str(tmp_path), dry_run=False)
-    with pytest.raises(ValueError, match="Direct modification of VCS internals or environment files is forbidden"):
+    with pytest.raises(
+        ValueError, match="Direct modification of VCS internals or environment files is forbidden"
+    ):
         executor.apply(WorkspaceAction(kind="write", path=".git/config", content="corrupted"))
 
 
 def test_modifying_env_file_rejected(tmp_path: Path) -> None:
     executor = WorkspaceExecutor(str(tmp_path), dry_run=False)
-    with pytest.raises(ValueError, match="Direct modification of VCS internals or environment files is forbidden"):
+    with pytest.raises(
+        ValueError, match="Direct modification of VCS internals or environment files is forbidden"
+    ):
         executor.apply(WorkspaceAction(kind="write", path=".env", content="SECRET=leaked"))
 
 

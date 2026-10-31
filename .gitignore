@@ -11,4 +11,5 @@ build/
 *.egg-info/
 *.db
 *.log
+evaluation_reports/
 .DS_Store
