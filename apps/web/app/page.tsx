@@ -46,11 +46,29 @@ interface FailureDiagnosis {
   suggested_recovery: string;
 }
 
+interface JournalOperation {
+  operation_id: string;
+  step_id: string;
+  idempotency_key: string;
+  tool: string;
+  input_hash: string;
+  state: string;
+  execution_attempt: number;
+  precondition_hash?: string | null;
+  postcondition_hash?: string | null;
+  recovery_status?: string | null;
+  started_at?: string | null;
+  completed_at?: string | null;
+}
+
 interface RepositorySummary {
   root?: string;
   file_count?: number;
   languages?: Record<string, number>;
   files?: Array<{ path: string; size: number; language: string }>;
+  frameworks?: string[];
+  manifests?: Record<string, { dependencies?: string[]; devDependencies?: string[]; scripts?: string[] }>;
+  test_mappings?: Record<string, string[]>;
 }
 
 interface RunResult {
@@ -63,6 +81,7 @@ interface RunResult {
   tool_results?: ToolRecord[];
   evidence_records?: EvidenceRecord[];
   failure_diagnosis?: FailureDiagnosis | null;
+  operations?: JournalOperation[];
 }
 
 interface EvaluationResult {
@@ -225,7 +244,7 @@ export default function Home() {
         <div className="eyebrow">AUTONOMOUS SOFTWARE ENGINEERING · CONTROL PLANE</div>
         <h1>Observe. Plan. Guard. Verify.</h1>
         <p className="lede">
-          Deterministic execution boundary, independent verification gates, persistent SQLite checkpoints, and
+          Deterministic execution boundary, independent verification gates, durable Operation Journal, and
           fail-closed tool safety.
         </p>
       </header>
@@ -254,7 +273,7 @@ export default function Home() {
           className={`tab ${activeTab === "evaluation" ? "active" : ""}`}
           onClick={() => setActiveTab("evaluation")}
         >
-          Evaluation Suite (10 Scenarios)
+          Evaluation Suite (15 Scenarios)
         </button>
       </nav>
 
@@ -318,7 +337,7 @@ export default function Home() {
             </button>
 
             <p className="hint">
-              Tools execute shell-free (`shell=False`) with strict timeouts and output bounding.
+              Tools execute shell-free (`shell=False`) with strict timeouts, SQLite WAL journaling, and idempotency guarantees.
             </p>
 
             {/* Recent runs list */}
@@ -372,7 +391,7 @@ export default function Home() {
                     <div>
                       <strong>Operator Approval Required</strong>
                       <p>
-                        A mutating workspace action has been proposed and paused. Inspect the plan and approve to proceed with execution.
+                        A mutating workspace action has been proposed and halted at the execution boundary. Operator approval will execute bounded changes. Rejection leaves repository unmodified.
                       </p>
                     </div>
                     <div className="approval-actions">
@@ -419,6 +438,45 @@ export default function Home() {
                         </div>
                       ))}
                     </div>
+                  </div>
+                )}
+
+                {/* Durable Operation Journal */}
+                {result.operations && result.operations.length > 0 && (
+                  <div>
+                    <h3 style={{ fontSize: 13, textTransform: "uppercase", color: "#64748b", margin: "24px 0 8px" }}>
+                      Durable Operation Journal ({result.operations.length})
+                    </h3>
+                    <table className="tool-table">
+                      <thead>
+                        <tr>
+                          <th>Operation ID</th>
+                          <th>Step</th>
+                          <th>Tool</th>
+                          <th>State</th>
+                          <th>Attempt</th>
+                          <th>Recovery / Idempotency</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {result.operations.map((op) => (
+                          <tr key={op.operation_id}>
+                            <td><code>{op.operation_id}</code></td>
+                            <td>{op.step_id}</td>
+                            <td><code>{op.tool}</code></td>
+                            <td><span className={`status ${op.state}`}>{op.state}</span></td>
+                            <td>#{op.execution_attempt}</td>
+                            <td style={{ fontSize: 11, color: "#94a3b8" }}>
+                              {op.recovery_status ? (
+                                <span style={{ color: "#38bdf8" }}>{op.recovery_status}</span>
+                              ) : (
+                                <code>key:{op.idempotency_key.slice(0, 8)}</code>
+                              )}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
                   </div>
                 )}
 
@@ -507,9 +565,36 @@ export default function Home() {
                 <b>{result.repository.file_count ?? 0}</b>
               </p>
 
+              {/* Detected Frameworks */}
+              {result.repository.frameworks && result.repository.frameworks.length > 0 && (
+                <div style={{ margin: "16px 0" }}>
+                  <div style={{ fontSize: 12, fontWeight: 700, color: "#94a3b8", marginBottom: 8 }}>
+                    DETECTED FRAMEWORKS & RUNNERS
+                  </div>
+                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                    {result.repository.frameworks.map((fw) => (
+                      <span
+                        key={fw}
+                        style={{
+                          background: "rgba(56, 189, 248, 0.15)",
+                          color: "#38bdf8",
+                          border: "1px solid rgba(56, 189, 248, 0.3)",
+                          borderRadius: 6,
+                          padding: "4px 10px",
+                          fontSize: 12,
+                          fontWeight: 700,
+                        }}
+                      >
+                        {fw}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               {/* Language breakdown */}
               {result.repository.languages && (
-                <div style={{ display: "flex", gap: 10, margin: "14px 0" }}>
+                <div style={{ display: "flex", gap: 10, margin: "14px 0", flexWrap: "wrap" }}>
                   {Object.entries(result.repository.languages).map(([lang, count]) => (
                     <div
                       key={lang}
@@ -530,9 +615,73 @@ export default function Home() {
                 </div>
               )}
 
+              {/* Dependency Manifests */}
+              {result.repository.manifests && Object.keys(result.repository.manifests).length > 0 && (
+                <div style={{ margin: "20px 0" }}>
+                  <div style={{ fontSize: 12, fontWeight: 700, color: "#94a3b8", marginBottom: 8 }}>
+                    DISCOVERED DEPENDENCY MANIFESTS
+                  </div>
+                  <div style={{ display: "grid", gap: 10 }}>
+                    {Object.entries(result.repository.manifests).map(([manifestFile, info]) => (
+                      <div
+                        key={manifestFile}
+                        style={{
+                          background: "#090e16",
+                          border: "1px solid #1a2433",
+                          borderRadius: 8,
+                          padding: 12,
+                        }}
+                      >
+                        <div style={{ fontWeight: 700, color: "#e2e8f0", fontSize: 13, marginBottom: 6 }}>
+                          <code>{manifestFile}</code>
+                        </div>
+                        {info.dependencies && info.dependencies.length > 0 && (
+                          <div style={{ fontSize: 11, color: "#94a3b8" }}>
+                            Dependencies ({info.dependencies.length}):{" "}
+                            <span style={{ color: "#cbd5e1" }}>
+                              {info.dependencies.slice(0, 10).join(", ")}
+                              {info.dependencies.length > 10 ? "..." : ""}
+                            </span>
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Test-to-Source Mappings */}
+              {result.repository.test_mappings && Object.keys(result.repository.test_mappings).length > 0 && (
+                <div style={{ margin: "20px 0" }}>
+                  <div style={{ fontSize: 12, fontWeight: 700, color: "#94a3b8", marginBottom: 8 }}>
+                    TEST-TO-SOURCE RELATIONSHIPS
+                  </div>
+                  <table className="tool-table" style={{ margin: 0 }}>
+                    <thead>
+                      <tr>
+                        <th>Source File</th>
+                        <th>Associated Test Files</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {Object.entries(result.repository.test_mappings).map(([src, tests]) => (
+                        <tr key={src}>
+                          <td><code>{src}</code></td>
+                          <td>
+                            {tests.map((t) => (
+                              <code key={t} style={{ marginRight: 6, color: "#34d399" }}>{t}</code>
+                            ))}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+
               {/* File list */}
               {result.repository.files && (
-                <div style={{ maxHeight: 400, overflowY: "auto", border: "1px solid #1a2433", borderRadius: 8 }}>
+                <div style={{ maxHeight: 350, overflowY: "auto", border: "1px solid #1a2433", borderRadius: 8, marginTop: 16 }}>
                   <table className="tool-table" style={{ margin: 0 }}>
                     <thead>
                       <tr>
@@ -641,19 +790,19 @@ export default function Home() {
       {activeTab === "evaluation" && (
         <section className="panel">
           <div className="panel-title">
-            <span>Independent Evaluation Suite</span>
+            <span>Independent Evaluation Suite (15 Scenarios)</span>
             <button onClick={runEvaluations} disabled={evalBusy}>
-              {evalBusy ? "Evaluating 10 Scenarios..." : "Run Evaluation Harness"}
+              {evalBusy ? "Evaluating 15 Scenarios..." : "Run Evaluation Harness"}
             </button>
           </div>
           <p className="hint">
             The agent does NOT grade itself. A separate independent evaluator assesses task completion, policy adherence,
-            truthfulness (refusal to claim false success), timeouts, and prompt injection defense.
+            truthfulness (refusal to claim false success), crash recovery, idempotency, timeouts, and prompt injection defense.
           </p>
 
           {!evalReport ? (
             <div className="empty">
-              Click &quot;Run Evaluation Harness&quot; to execute the 10 benchmark scenarios against fresh isolated workspaces.
+              Click &quot;Run Evaluation Harness&quot; to execute the 15 benchmark scenarios against fresh isolated workspaces.
             </div>
           ) : (
             <div style={{ marginTop: 20 }}>
@@ -677,7 +826,7 @@ export default function Home() {
               </div>
 
               <h4 style={{ fontSize: 13, textTransform: "uppercase", color: "#64748b", margin: "24px 0 10px" }}>
-                Scenario Breakdown
+                Scenario Breakdown ({evalReport.scenarios.length})
               </h4>
               <table className="tool-table">
                 <thead>

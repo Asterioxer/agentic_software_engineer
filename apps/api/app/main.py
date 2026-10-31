@@ -91,7 +91,9 @@ def get_run(run_id: str) -> dict[str, Any]:
     checkpoint = _store.get_checkpoint(run_id)
     if not checkpoint:
         raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found.")
-    return checkpoint.model_dump()
+    data = checkpoint.model_dump()
+    data["operations"] = [op.model_dump() for op in _store.list_operations_for_run(run_id)]
+    return data
 
 
 @app.post("/api/v1/runs/{run_id}/resume")

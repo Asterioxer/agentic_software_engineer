@@ -400,6 +400,9 @@ class AgentRun:
                 else None
             ),
             "checkpoint": self.checkpoint.model_dump(),
+            "operations": [
+                op.model_dump() for op in self.store.list_operations_for_run(self.run_id)
+            ],
         }
 
 
