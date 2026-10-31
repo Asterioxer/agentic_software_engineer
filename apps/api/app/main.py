@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from .change_analysis import analyze_diff
@@ -20,6 +22,8 @@ from .security import SecurityHeadersMiddleware, allowed_origins
 from .store import get_default_store
 from .tools import build_default_registry
 
+logger = logging.getLogger("agentic_software_engineer")
+
 app = FastAPI(
     title="Agentic Software Engineer",
     version="0.6.0",
@@ -32,6 +36,19 @@ app.add_middleware(
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    if isinstance(exc, HTTPException):
+        return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+    logger.exception("Unhandled server exception on %s %s: %s", request.method, request.url.path, exc)
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "An internal server error occurred while processing the request."},
+    )
+
+
 _registry = build_default_registry()
 _policy = ToolPolicy()
 _store = get_default_store()

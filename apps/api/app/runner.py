@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -402,6 +403,17 @@ class AgentRun:
         }
 
 
+_RUN_LOCKS_MUTEX = threading.Lock()
+_RUN_LOCKS: dict[str, threading.Lock] = {}
+
+
+def _get_run_lock(run_id: str) -> threading.Lock:
+    with _RUN_LOCKS_MUTEX:
+        if run_id not in _RUN_LOCKS:
+            _RUN_LOCKS[run_id] = threading.Lock()
+        return _RUN_LOCKS[run_id]
+
+
 def resume_run(
     run_id: str,
     approved: bool = False,
@@ -410,23 +422,42 @@ def resume_run(
     store: RunStore | None = None,
 ) -> dict[str, object]:
     """Resume an existing run from its stored checkpoint, honoring operator approval."""
-    effective_store = store or get_default_store()
-    checkpoint = effective_store.get_checkpoint(run_id)
-    if not checkpoint:
-        raise ValueError(f"Run '{run_id}' not found in checkpoint store.")
+    lock = _get_run_lock(run_id)
+    with lock:
+        effective_store = store or get_default_store()
+        checkpoint = effective_store.get_checkpoint(run_id)
+        if not checkpoint:
+            raise ValueError(f"Run '{run_id}' not found in checkpoint store.")
 
-    from .policy import ToolPolicy
-    from .tools import build_default_registry
+        # Guard against duplicate concurrent execution when already completed
+        if checkpoint.status == RunStatus.COMPLETED:
+            from .policy import ToolPolicy
+            from .tools import build_default_registry
 
-    effective_registry = registry or build_default_registry()
-    effective_policy = policy or ToolPolicy()
+            effective_registry = registry or build_default_registry()
+            effective_policy = policy or ToolPolicy()
+            runner = AgentRun(
+                task=checkpoint.task,
+                registry=effective_registry,
+                policy=effective_policy,
+                run_id=checkpoint.run_id,
+                store=effective_store,
+                existing_checkpoint=checkpoint,
+            )
+            return runner._build_response(RunStatus.COMPLETED)
 
-    runner = AgentRun(
-        task=checkpoint.task,
-        registry=effective_registry,
-        policy=effective_policy,
-        run_id=checkpoint.run_id,
-        store=effective_store,
-        existing_checkpoint=checkpoint,
-    )
-    return runner.execute(auto_approved=approved)
+        from .policy import ToolPolicy
+        from .tools import build_default_registry
+
+        effective_registry = registry or build_default_registry()
+        effective_policy = policy or ToolPolicy()
+
+        runner = AgentRun(
+            task=checkpoint.task,
+            registry=effective_registry,
+            policy=effective_policy,
+            run_id=checkpoint.run_id,
+            store=effective_store,
+            existing_checkpoint=checkpoint,
+        )
+        return runner.execute(auto_approved=approved)
