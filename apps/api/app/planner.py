@@ -74,7 +74,7 @@ def build_deterministic_plan(
             id="verify",
             description="Run independent deterministic checks.",
             tool="verification.run",
-            inputs={"repository": task.repository, "expected_files": []},
+            inputs={"repository": task.repository, "expected_files": list(task.expected_files)},
             expected_outputs=["verification_evidence", "gate_status"],
             validation_criteria=["All verification gates evaluate to true."],
             success_criteria=["Mandatory checks pass."],

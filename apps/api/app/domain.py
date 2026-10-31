@@ -59,6 +59,7 @@ class TaskSpec(BaseModel):
     dry_run: bool = Field(default=True)
     auto_approve: bool = Field(default=False)
     max_retries: int = Field(default=2, ge=0, le=10)
+    expected_files: list[str] = Field(default_factory=list, max_length=50)
 
 
 class PlanStep(BaseModel):

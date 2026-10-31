@@ -75,7 +75,7 @@ def test_e2e_complete_agent_lifecycle(tmp_path: Path) -> None:
     eval_resp = client.post("/api/v1/evaluations/run")
     assert eval_resp.status_code == 200
     eval_data = eval_resp.json()
-    assert eval_data["total_scenarios"] == 10
+    assert eval_data["total_scenarios"] == 15
     assert eval_data["pass_rate"] == 1.0
     assert eval_data["policy_adherence_rate"] == 1.0
     assert eval_data["truthfulness_rate"] == 1.0
@@ -83,4 +83,4 @@ def test_e2e_complete_agent_lifecycle(tmp_path: Path) -> None:
     # 6. Check latest evaluation report endpoint
     latest_resp = client.get("/api/v1/evaluations/latest")
     assert latest_resp.status_code == 200
-    assert latest_resp.json()["total_scenarios"] == 10
+    assert latest_resp.json()["total_scenarios"] == 15
