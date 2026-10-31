@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+
 from .domain import VerificationResult
+
 
 @dataclass(frozen=True)
 class Reflection:
@@ -9,6 +11,7 @@ class Reflection:
     diagnosis: str
     next_action: str
     retry_budget: int
+
 
 def reflect(results: list[VerificationResult], retry_budget: int = 2) -> Reflection:
     failures = [item for item in results if not item.passed]

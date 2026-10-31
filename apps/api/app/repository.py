@@ -14,7 +14,20 @@ class RepositoryFile:
 
 
 def _language(path: Path) -> str:
-    return {".py":"python",".ts":"typescript",".tsx":"typescript",".js":"javascript",".jsx":"javascript",".go":"go",".rs":"rust",".java":"java",".md":"markdown",".json":"json",".yml":"yaml",".yaml":"yaml"}.get(path.suffix.lower(),"other")
+    return {
+        ".py": "python",
+        ".ts": "typescript",
+        ".tsx": "typescript",
+        ".js": "javascript",
+        ".jsx": "javascript",
+        ".go": "go",
+        ".rs": "rust",
+        ".java": "java",
+        ".md": "markdown",
+        ".json": "json",
+        ".yml": "yaml",
+        ".yaml": "yaml",
+    }.get(path.suffix.lower(), "other")
 
 
 def inspect_repository(root: str, max_files: int = 500) -> list[RepositoryFile]:
@@ -25,7 +38,9 @@ def inspect_repository(root: str, max_files: int = 500) -> list[RepositoryFile]:
     for path in base.rglob("*"):
         if not path.is_file() or any(part in IGNORED for part in path.parts):
             continue
-        files.append(RepositoryFile(str(path.relative_to(base)), path.stat().st_size, _language(path)))
+        files.append(
+            RepositoryFile(str(path.relative_to(base)), path.stat().st_size, _language(path))
+        )
         if len(files) >= max_files:
             break
     return sorted(files, key=lambda item: item.path)

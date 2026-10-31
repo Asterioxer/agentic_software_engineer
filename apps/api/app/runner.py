@@ -5,6 +5,7 @@ from .planner import plan_with_repository
 from .policy import ToolPolicy
 from .tools import ToolRegistry
 
+
 class AgentRun:
     def __init__(self, task: TaskSpec, registry: ToolRegistry, policy: ToolPolicy) -> None:
         self.task, self.registry, self.policy = task, registry, policy
@@ -31,13 +32,23 @@ class AgentRun:
             decision = self.policy.authorize(call)
             if not decision.allowed:
                 self._emit(RunStatus.FAILED, decision.reason)
-                return {"status": "failed", "plan": plan, "repository": repository, "events": self.events}
+                return {
+                    "status": "failed",
+                    "plan": plan,
+                    "repository": repository,
+                    "events": self.events,
+                }
             try:
                 result = self.registry.get(step.tool).handler(call.arguments)
                 tool_results.append({"tool": step.tool, "result": result})
             except (OSError, ValueError, KeyError) as exc:
                 self._emit(RunStatus.FAILED, f"{step.tool} failed: {exc}")
-                return {"status": "failed", "plan": plan, "repository": repository, "events": self.events}
+                return {
+                    "status": "failed",
+                    "plan": plan,
+                    "repository": repository,
+                    "events": self.events,
+                }
 
         self._emit(RunStatus.VERIFYING, "Running independent deterministic checks.")
         results = [
@@ -70,13 +81,21 @@ class AgentRun:
         if not all(result.passed for result in results):
             self._emit(RunStatus.FAILED, "Verification failed.")
             return {
-                "status": "failed", "plan": plan, "repository": repository,
-                "tool_results": tool_results, "verification": results, "events": self.events,
+                "status": "failed",
+                "plan": plan,
+                "repository": repository,
+                "tool_results": tool_results,
+                "verification": results,
+                "events": self.events,
             }
 
         self._emit(RunStatus.REFLECTING, "Summarizing execution evidence.")
         self._emit(RunStatus.COMPLETED, "Run completed with verification evidence.")
         return {
-            "status": "completed", "plan": plan, "repository": repository,
-            "tool_results": tool_results, "verification": results, "events": self.events,
+            "status": "completed",
+            "plan": plan,
+            "repository": repository,
+            "tool_results": tool_results,
+            "verification": results,
+            "events": self.events,
         }

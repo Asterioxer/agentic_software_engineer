@@ -4,12 +4,15 @@ import os
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+from typing import ClassVar
+
 
 @dataclass(frozen=True)
 class CommandSpec:
     id: str
     argv: tuple[str, ...]
     timeout_seconds: float = 30.0
+
 
 @dataclass(frozen=True)
 class CommandResult:
@@ -21,8 +24,9 @@ class CommandResult:
     stderr: str
     truncated: bool
 
+
 class CommandPolicy:
-    ALLOWED: dict[str, tuple[str, ...]] = {
+    ALLOWED: ClassVar[dict[str, tuple[str, ...]]] = {
         "python.tests": ("python", "-m", "pytest"),
         "python.compile": ("python", "-m", "compileall"),
         "git.diff.check": ("git", "diff", "--check"),
@@ -40,6 +44,7 @@ class CommandPolicy:
             raise ValueError(f"Command '{command_id}' does not accept arguments.")
         return CommandSpec(command_id, base)
 
+
 class CommandRunner:
     """Runs only structured, allowlisted commands inside the repository root."""
 
@@ -47,16 +52,33 @@ class CommandRunner:
         self.root = Path(root).resolve()
         self.policy = policy or CommandPolicy()
 
-    def run(self, command_id: str, extra_args: tuple[str, ...] = (), timeout_seconds: float = 30.0) -> CommandResult:
+    def run(
+        self,
+        command_id: str,
+        extra_args: tuple[str, ...] = (),
+        timeout_seconds: float = 30.0,
+    ) -> CommandResult:
         if not self.root.exists() or not self.root.is_dir():
             raise ValueError("Command workspace root must be an existing directory.")
         timeout = min(timeout_seconds, self.policy.MAX_TIMEOUT)
         if timeout <= 0:
             raise ValueError("Command timeout must be positive.")
         spec = self.policy.resolve(command_id, extra_args)
-        env = {"PATH": os.environ.get("PATH", ""), "HOME": str(self.root), "PYTHONUNBUFFERED": "1"}
+        env = {
+            "PATH": os.environ.get("PATH", ""),
+            "HOME": str(self.root),
+            "PYTHONUNBUFFERED": "1",
+        }
         try:
-            completed = subprocess.run(list(spec.argv), cwd=self.root, env=env, shell=False, capture_output=True, timeout=timeout, check=False)
+            completed = subprocess.run(
+                list(spec.argv),
+                cwd=self.root,
+                env=env,
+                shell=False,
+                capture_output=True,
+                timeout=timeout,
+                check=False,
+            )
             timed_out = False
             exit_code = completed.returncode
             stdout = completed.stdout[: self.policy.MAX_OUTPUT_BYTES]
@@ -66,7 +88,16 @@ class CommandRunner:
             exit_code = None
             stdout = (exc.stdout or b"")[: self.policy.MAX_OUTPUT_BYTES]
             stderr = (exc.stderr or b"")[: self.policy.MAX_OUTPUT_BYTES]
-        stdout_text = stdout.decode("utf-8", errors="replace") if isinstance(stdout, bytes) else str(stdout)
-        stderr_text = stderr.decode("utf-8", errors="replace") if isinstance(stderr, bytes) else str(stderr)
-        truncated = len(stdout_text.encode()) >= self.policy.MAX_OUTPUT_BYTES or len(stderr_text.encode()) >= self.policy.MAX_OUTPUT_BYTES
-        return CommandResult(command_id, spec.argv, exit_code, timed_out, stdout_text, stderr_text, truncated)
+        stdout_text = (
+            stdout.decode("utf-8", errors="replace") if isinstance(stdout, bytes) else str(stdout)
+        )
+        stderr_text = (
+            stderr.decode("utf-8", errors="replace") if isinstance(stderr, bytes) else str(stderr)
+        )
+        truncated = (
+            len(stdout_text.encode()) >= self.policy.MAX_OUTPUT_BYTES
+            or len(stderr_text.encode()) >= self.policy.MAX_OUTPUT_BYTES
+        )
+        return CommandResult(
+            command_id, spec.argv, exit_code, timed_out, stdout_text, stderr_text, truncated
+        )
