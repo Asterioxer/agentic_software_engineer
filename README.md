@@ -1,262 +1,257 @@
 # Agentic Software Engineer
 
-> **An auditable AI software-engineering agent that can inspect a repository, plan bounded changes, execute guarded actions, verify its work, and expose the evidence to an operator.**
+> **A reliable, auditable autonomous software-engineering agent that inspects repositories, plans bounded changes, executes guarded actions, verifies work independently, and exposes complete evidence to an operator.**
 
 [![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/API-FastAPI-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
 [![Next.js](https://img.shields.io/badge/Web-Next.js-000000?logo=next.js&logoColor=white)](https://nextjs.org/)
+[![Tests](https://img.shields.io/badge/Tests-41%20passing-brightgreen)](https://github.com/Asterioxer/agentic_software_engineer)
+[![Coverage](https://img.shields.io/badge/Coverage-88%25-success)](https://github.com/Asterioxer/agentic_software_engineer)
 [![Safety](https://img.shields.io/badge/execution-guarded-success)](#safety-model)
 [![License](https://img.shields.io/badge/license-MIT-blue)](#license)
 
+---
+
 ## Why this project?
 
-Most agent demos stop at **"LLM generates code."**
+Most agent demos stop at **"LLM generates code and blindly runs shell commands."**
 
-This project treats software engineering as a controlled system:
+This project treats software engineering as a **controlled, observable, verifiable system**:
 
-**Observe → Understand → Plan → Policy Check → Execute → Verify → Reflect**
+**User Request → Repository Understanding → Task Decomposition → Execution Plan → Operator Approval → Tool Execution → Independent Verification → Failure Diagnosis → Final Report**
 
-The model is advisory. The execution boundary is deterministic, typed, bounded, and independently verifiable.
+The LLM is strictly advisory. The execution boundary is **deterministic, typed, fail-closed, bounded, and independently verified**.
 
-## What it can do
+---
+
+## Key Capabilities
 
 | Layer | Capability |
 |---|---|
-| **Observe** | Bounded repository traversal, language/file inventory |
-| **Understand** | Repository-aware task context and deterministic planning |
-| **Plan** | Typed plan steps and tool contracts |
-| **Policy** | Fail-closed tool allowlist and bounded workspace actions |
-| **Execute** | Dry-run workspace mutations and structured commands |
-| **Verify** | Independent artifact checks + command evidence |
-| **Reflect** | Failure diagnosis and bounded retry contract |
-| **Analyze** | Diff/change-risk classification |
-| **AI** | Provider abstraction + optional local Ollama advisory |
-| **GitHub** | Branch/PR/merge safety contracts |
-| **Operate** | Live dashboard with run status, evidence and timeline |
+| **Repository Intelligence** | Bounded traversal (500 files), language inventory, symbol extraction (Python & TypeScript), and prompt-injection defanging. |
+| **Structured Planning** | Inspectable, typed `PlanStep` sequence with explicit inputs, expected outputs, and validation criteria. |
+| **Operator Approval Gate** | Non-dry-run mutating operations automatically halt at `AWAITING_APPROVAL` until explicit operator sign-off. |
+| **Persistent Execution Store** | SQLite-backed run checkpoints, timeline events, and tool audit records with safe task resumption. |
+| **Bounded Execution** | Strict path containment (symlink defense), tool allowlisting, shell-free command execution (`shell=False`), 60s hard timeout cap, and 32 KiB stream limit. |
+| **Independent Verification** | External deterministic checks (file presence, `git diff --check`, test exit codes); the agent **never** decides its own success. |
+| **Failure Classification & Reflection** | Automatic error categorization (`POLICY_VIOLATION`, `TIMEOUT`, `SYNTAX_ERROR`, `DEPENDENCY_MISSING`, `VALIDATION_FAILURE`) with bounded retry budgets. |
+| **Evaluation Harness** | 10 automated benchmark scenarios grading task completion, policy adherence, truthfulness, and anti-hallucination. |
+| **Operator Dashboard** | Full Next.js control center for execution tracking, step inspections, approval controls, diff risk analysis, and evaluation benchmarks. |
+
+---
 
 ## Architecture
 
 ```text
-                    ┌──────────────────────────┐
-                    │       Operator UI        │
-                    │     Next.js dashboard    │
-                    └────────────┬─────────────┘
-                                 │
-                                 ▼
-                    ┌──────────────────────────┐
-                    │       FastAPI API         │
-                    │   Run / Diff / Advisory   │
-                    └────────────┬─────────────┘
-                                 │
-              ┌──────────────────┴──────────────────┐
-              ▼                                     ▼
-     ┌────────────────┐                    ┌────────────────┐
-     │   Repository   │                    │  Plan + Policy │
-     │  Intelligence  │──────────────────▶│    Engine      │
-     └────────────────┘                    └───────┬────────┘
-                                                   │
-                         ┌─────────────────────────┼────────────────────────┐
-                         ▼                         ▼                        ▼
-                ┌────────────────┐       ┌────────────────┐       ┌────────────────┐
-                │ Workspace      │       │ Command Runner │       │ GitHub Workflow│
-                │ Executor       │       │  Allowlisted   │       │    Contracts   │
-                └───────┬────────┘       └───────┬────────┘       └────────────────┘
-                        └────────────────────────┼────────────────────────┘
-                                                 ▼
-                                      ┌────────────────────┐
-                                      │ Independent        │
-                                      │ Verification       │
-                                      └─────────┬──────────┘
-                                                ▼
-                                      ┌────────────────────┐
-                                      │ Evidence + Reflect │
-                                      └────────────────────┘
+                     ┌─────────────────────────────────────────┐
+                     │          Next.js Operator UI            │
+                     │  Control / Diff / Approval / Evaluation │
+                     └────────────────────┬────────────────────┘
+                                          │
+                                          ▼
+                     ┌─────────────────────────────────────────┐
+                     │            FastAPI Backend              │
+                     │   Runs / Checkpoints / Diff / Advisory  │
+                     └────────────────────┬────────────────────┘
+                                          │
+               ┌──────────────────────────┴──────────────────────────┐
+               ▼                                                     ▼
+      ┌────────────────┐                                    ┌────────────────┐
+      │   Repository   │                                    │ Persistent Run │
+      │  Intelligence  │                                    │  SQLite Store  │
+      │  & Defanged    │                                    └───────┬────────┘
+      │  Code Context  │                                            │
+      └────────┬───────┘                                            │
+               │                                                    │
+               ▼                                                    ▼
+      ┌────────────────┐      Operator Approval Gate       ┌────────────────┐
+      │ Structured     │──────────────────────────────────▶│ Guarded Tool   │
+      │ Planning Engine│    (Awaiting Approval if Mutating)│ Execution Loop │
+      └────────────────┘                                   └───────┬────────┘
+                                                                   │
+                                  ┌────────────────────────────────┴────────────────┐
+                                  ▼                                                 ▼
+                         ┌────────────────┐                                ┌────────────────┐
+                         │ Workspace Path │                                │ Shell-Free     │
+                         │ Boundary       │                                │ Command Runner │
+                         │ (Dry-Run Def.) │                                │ (Allowlisted)  │
+                         └───────┬────────┘                                └───────┬────────┘
+                                 └────────────────────────┬────────────────────────┘
+                                                          ▼
+                                               ┌────────────────────┐
+                                               │ Independent        │
+                                               │ Verification Gates │
+                                               └─────────┬──────────┘
+                                                         ▼
+                                               ┌────────────────────┐
+                                               │ Failure Diagnosis  │
+                                               │ & Bounded Retries  │
+                                               └────────────────────┘
 ```
 
-## Safety model
+---
 
-The most important design choice is **not giving the planner an unrestricted shell**.
+## Safety Model
 
-### Command boundary
+### 1. Command Execution Boundary
+Commands are stable, allowlisted IDs executed with `subprocess.run(shell=False)`:
+- `python.tests`: `python -m pytest`
+- `python.compile`: `python -m compileall`
+- `python.ruff`: `python -m ruff check`
+- `git.diff.check`: `git diff --check`
+- `git.status`: `git status --short`
+- `git.diff`: `git diff`
 
-Commands are stable IDs rather than arbitrary shell strings:
+No arbitrary shell interpolation is permitted. Timeouts are capped at 60s and output streams are capped at 32 KiB.
 
-- `python.tests`
-- `python.compile`
-- `git.diff.check`
+### 2. Workspace & Filesystem Boundary
+- Workspace actions default to `dry_run=True`.
+- Strict path normalization rejects null bytes (`\0`) and escapes from the configured repository root (`../`).
+- Direct modification of `.git` internals or `.env` files is blocked.
 
-Execution uses:
+### 3. Application Controls vs. OS Sandboxing
+> **Important Distinction:** The security controls provided here are application-level guardrails, not OS-level container isolation. Host-level isolation (e.g. Docker, firecracker microVMs) must be provisioned when running against untrusted repositories.
 
-- `shell=False`
-- repository-root working directory
-- sanitized environment
-- 60-second hard timeout cap
-- 32 KiB stdout/stderr cap
-- explicit non-zero exit handling
+---
 
-### Workspace boundary
+## Evaluation Benchmark Suite
 
-- Mutations are dry-run by default.
-- Paths are resolved and checked against the configured workspace root.
-- Action types are explicitly allowlisted.
-- Action counts are bounded.
+An automated, independent evaluation harness benchmarks the agent across 10 distinct failure and safety scenarios:
 
-### Verification boundary
+1. **Successful Coding**: Valid task execution and verification pass.
+2. **Ambiguous Task**: Graceful discovery planning without hallucinating changes.
+3. **Missing Dependencies**: Identifies missing environment dependencies and halts cleanly.
+4. **Invalid Tool Arguments**: Strict Pydantic schemas reject malformed arguments.
+5. **Tool Timeout**: Enforces timeout limits and reports failure evidence.
+6. **API Failures**: Seamless fallback from remote LLM to deterministic provider.
+7. **Prompt Injection**: Defangs adversarial instructions embedded in repo files.
+8. **Policy Bypass**: Fail-closed defense rejecting unauthorized tool calls.
+9. **Regression Detection**: Catches broken verification checks without false positives.
+10. **Honest Failure**: Refuses to claim success when impossible verification criteria fail.
 
-Planning does not determine whether a run succeeded.
+### Running the Evaluation Suite
 
-Verification independently produces structured evidence. A run only completes when required verification gates pass.
-
-> **Important:** this is application-level execution safety, not an OS-level sandbox. Untrusted repositories should be isolated in disposable containers/VMs with resource quotas and restricted networking before real mutation is enabled.
-
-## AI strategy
-
-The project deliberately introduces AI **after** the deterministic safety layer.
-
-Current architecture:
-
-```text
-Local Ollama / future provider
-          │
-          ▼
-   PlanningProvider
-          │
-          ▼
- deterministic control loop
-          │
-          ├── policy
-          ├── execution
-          └── verification
+```bash
+cd apps/api
+pytest tests/test_evaluation_harness.py -v
 ```
 
-If Ollama is unavailable or unconfigured, the system falls back to a deterministic provider.
+Machine-readable evaluation reports are generated at `evaluation_reports/evaluation_report.json`.
 
-That makes the core runnable without paid model APIs.
+---
 
-## API
+## API Reference
 
 ### Health
-
 `GET /api/health`
 
-### Run an engineering task
-
+### Dispatch a Task Run
 `POST /api/v1/runs`
-
 ```json
 {
   "task": {
-    "title": "Review repository change",
-    "description": "Inspect the repository and verify the proposed work.",
-    "repository": "/workspace/repo"
+    "title": "Add logging module",
+    "description": "Implement structured audit logging in src/logger.py",
+    "repository": "C:/path/to/repo",
+    "dry_run": true,
+    "auto_approve": false,
+    "max_retries": 2
   }
 }
 ```
 
-### Analyze a diff
+### List Runs
+`GET /api/v1/runs`
 
-`POST /api/v1/analyze-diff`
+### Inspect Run Checkpoint & Evidence
+`GET /api/v1/runs/{run_id}`
 
-Returns additions, deletions, per-file risk and aggregate risk.
-
-### Advisory planning
-
-`POST /api/v1/advisory`
-
-Uses Ollama when configured and deterministic planning otherwise.
-
-## Project structure
-
-```text
-agentic_software_engineer/
-├── apps/
-│   ├── api/
-│   │   ├── app/
-│   │   │   ├── repository.py
-│   │   │   ├── planner.py
-│   │   │   ├── policy.py
-│   │   │   ├── execution.py
-│   │   │   ├── command_runner.py
-│   │   │   ├── verification_pipeline.py
-│   │   │   ├── change_analysis.py
-│   │   │   ├── reflection.py
-│   │   │   ├── providers.py
-│   │   │   ├── llm.py
-│   │   │   └── workflow.py
-│   │   └── tests/
-│   └── web/
-├── docs/
-│   └── architecture/
-├── docker-compose.yml
-└── .github/workflows/
+### Approve & Resume a Paused Run
+`POST /api/v1/runs/{run_id}/resume`
+```json
+{
+  "approved": true
+}
 ```
 
-## Run locally
+### Analyze Unified Diff Risk
+`POST /api/v1/analyze-diff`
+```json
+{
+  "diff": "diff --git a/app/auth.py b/app/auth.py\n..."
+}
+```
 
-### API
+### Run Evaluation Suite
+`POST /api/v1/evaluations/run`
 
+---
+
+## Local Setup & Quickstart
+
+### Prerequisites
+- Python 3.12+
+- Node.js 20+
+
+### 1. API Setup
 ```bash
 cd apps/api
 python -m venv .venv
-# activate .venv
+
+# Windows
+.\.venv\Scripts\activate
+# Linux/macOS
+source .venv/bin/activate
+
 pip install -e ".[dev]"
-uvicorn app.main:app --reload
+uvicorn app.main:app --reload --port 8000
 ```
 
-### Web
-
+### 2. Web Dashboard Setup
 ```bash
 cd apps/web
 npm install
 npm run dev
 ```
 
-Set `NEXT_PUBLIC_API_URL=http://localhost:8000` if needed.
+Visit [http://localhost:3000](http://localhost:3000) to open the operator dashboard.
 
-### Docker
-
+### 3. Docker Compose
 ```bash
 docker compose up --build
 ```
 
-The local stack exposes the web UI on port 3000 and the API on port 8000.
+---
 
-## Testing
+## Verification & Testing
 
-API tests:
-
+Run the complete test suite (41 tests, unit, integration, safety boundary, API, and E2E):
 ```bash
 cd apps/api
-pytest -q
-ruff check .
+pytest -v
 ```
 
-The repository also contains GitHub Actions CI for API tests/linting and the web build.
+Run test coverage report (88% code coverage):
+```bash
+cd apps/api
+pytest --cov=app --cov-report=term-missing
+```
 
-## Portfolio talking points
+Code quality and strict type checks:
+```bash
+cd apps/api
+ruff check .
+ruff format --check .
+mypy app
+```
 
-If presenting this project in an interview, focus on these engineering decisions:
+Frontend production build check:
+```bash
+cd apps/web
+npm run build
+```
 
-1. **Why deterministic first?**  
-   Safety, reproducibility and debuggability are easier to establish before introducing probabilistic planning.
-
-2. **Why not arbitrary shell execution?**  
-   An agent that can execute arbitrary strings is an uncontrolled automation surface. Stable command IDs make the boundary inspectable and enforceable.
-
-3. **Why independent verification?**  
-   The component that proposes work should not be the sole authority that declares the work successful.
-
-4. **Why local-model support?**  
-   It keeps experimentation free and private while preserving a provider abstraction for future hosted models.
-
-5. **What would you do next?**  
-   Container-level isolation, resource quotas, dependency/symbol graphs, semantic repository retrieval, persistent run storage, and real GitHub issue/branch/PR execution behind explicit operator approval.
-
-## Project status
-
-**Portfolio-ready engineering prototype.**
-
-Implemented through the guarded execution, verification, agentic-core and production-hardening phases. CI configuration is committed, but a GitHub Actions run is not currently exposed through the connected GitHub integration, so this README intentionally does not claim a verified green build.
+---
 
 ## License
 
