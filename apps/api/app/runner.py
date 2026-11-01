@@ -27,6 +27,7 @@ from .planner import plan_with_repository
 from .policy import ToolPolicy
 from .reflection import classify_failure, reflect
 from .store import RunStore, get_default_store
+from .telemetry import get_event_bus
 from .tools import ToolRegistry
 
 
@@ -73,6 +74,11 @@ class AgentRun:
         self.checkpoint.events = list(self.events)
         self.checkpoint.status = status
         self.store.append_event(self.run_id, event)
+        get_event_bus().publish(
+            self.run_id,
+            event_type=f"status:{status.value}",
+            payload={"sequence": event.sequence, "status": status.value, "message": message},
+        )
 
     def _save_checkpoint(self) -> None:
         self.checkpoint.events = list(self.events)
@@ -384,6 +390,13 @@ class AgentRun:
         return self._build_response(RunStatus.COMPLETED)
 
     def _build_response(self, status: RunStatus) -> dict[str, object]:
+        if status in (
+            RunStatus.COMPLETED,
+            RunStatus.FAILED,
+            RunStatus.AWAITING_APPROVAL,
+            RunStatus.RECONCILIATION_REQUIRED,
+        ):
+            get_event_bus().close_run(self.run_id)
         return {
             "run_id": self.run_id,
             "status": status.value,

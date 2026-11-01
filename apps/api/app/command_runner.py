@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-import os
-import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import ClassVar
+
+from .sandbox import ExecutionSandbox, get_default_sandbox
 
 
 @dataclass(frozen=True)
@@ -30,7 +30,7 @@ class CommandPolicy:
 
     SAFETY WARNING:
     Application-level command filter using shell=False.
-    This does NOT provide OS-level process virtualization or container sandboxing.
+    This does NOT provide OS-level process virtualization or container sandboxing on its own.
     """
 
     ALLOWED: ClassVar[dict[str, tuple[str, ...]]] = {
@@ -56,29 +56,17 @@ class CommandPolicy:
 
 
 class CommandRunner:
-    """Runs allowlisted structured commands inside the repository root with process tree cleanup."""
+    """Runs allowlisted structured commands inside the repository root via a pluggable sandbox."""
 
-    def __init__(self, root: str, policy: CommandPolicy | None = None) -> None:
+    def __init__(
+        self,
+        root: str,
+        policy: CommandPolicy | None = None,
+        sandbox: ExecutionSandbox | None = None,
+    ) -> None:
         self.root = Path(root).resolve()
         self.policy = policy or CommandPolicy()
-
-    def _kill_process_tree(self, proc: subprocess.Popen[bytes]) -> None:
-        """Safely terminate child process and all descendants on timeout."""
-        try:
-            if os.name == "nt":
-                subprocess.run(
-                    ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
-                    capture_output=True,
-                    check=False,
-                )
-            else:
-                proc.kill()
-        except OSError:
-            pass
-        try:
-            proc.kill()
-        except OSError:
-            pass
+        self.sandbox = sandbox or get_default_sandbox()
 
     def run(
         self,
@@ -93,51 +81,19 @@ class CommandRunner:
             raise ValueError("Command timeout must be positive.")
         spec = self.policy.resolve(command_id, extra_args)
 
-        # Filtered environment: disallow passing ambient credentials, tokens, or arbitrary env
-        safe_env = {
-            "PATH": os.environ.get("PATH", ""),
-            "HOME": str(self.root),
-            "PYTHONUNBUFFERED": "1",
-            "SYSTEMROOT": os.environ.get("SYSTEMROOT", "C:\\Windows"),
-            "COMSPEC": os.environ.get("COMSPEC", ""),
-        }
-
-        proc = subprocess.Popen(
-            list(spec.argv),
+        sb_result = self.sandbox.execute(
+            argv=spec.argv,
             cwd=self.root,
-            env=safe_env,
-            shell=False,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            timeout=timeout,
+            max_output_bytes=self.policy.MAX_OUTPUT_BYTES,
         )
 
-        try:
-            stdout_bytes, stderr_bytes = proc.communicate(timeout=timeout)
-            timed_out = False
-            exit_code = proc.returncode
-            stdout = stdout_bytes[: self.policy.MAX_OUTPUT_BYTES]
-            stderr = stderr_bytes[: self.policy.MAX_OUTPUT_BYTES]
-        except subprocess.TimeoutExpired:
-            timed_out = True
-            exit_code = None
-            self._kill_process_tree(proc)
-            try:
-                stdout_bytes, stderr_bytes = proc.communicate(timeout=2.0)
-            except subprocess.TimeoutExpired:
-                stdout_bytes, stderr_bytes = b"", b""
-            stdout = stdout_bytes[: self.policy.MAX_OUTPUT_BYTES]
-            stderr = stderr_bytes[: self.policy.MAX_OUTPUT_BYTES]
-
-        stdout_text = (
-            stdout.decode("utf-8", errors="replace") if isinstance(stdout, bytes) else str(stdout)
-        )
-        stderr_text = (
-            stderr.decode("utf-8", errors="replace") if isinstance(stderr, bytes) else str(stderr)
-        )
-        truncated = (
-            len(stdout_text.encode()) >= self.policy.MAX_OUTPUT_BYTES
-            or len(stderr_text.encode()) >= self.policy.MAX_OUTPUT_BYTES
-        )
         return CommandResult(
-            command_id, spec.argv, exit_code, timed_out, stdout_text, stderr_text, truncated
+            id=command_id,
+            argv=spec.argv,
+            exit_code=sb_result.exit_code,
+            timed_out=sb_result.timed_out,
+            stdout=sb_result.stdout,
+            stderr=sb_result.stderr,
+            truncated=sb_result.truncated,
         )

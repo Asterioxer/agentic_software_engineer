@@ -91,3 +91,22 @@ def test_api_critic_review_workspace_endpoint(tmp_path: Path) -> None:
     data = resp.json()
     assert data["approved"] is True
     assert data["risk_score"] == 0.0
+
+
+def test_api_deliberate_endpoint(tmp_path: Path) -> None:
+    resp = client.post(
+        "/api/v1/deliberate",
+        json={
+            "task": {
+                "title": "Build user auth subsystem",
+                "description": "Design modular authentication tokens",
+                "repository": str(tmp_path),
+            }
+        },
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["consensus_reached"] is True
+    assert "app/auth.py" in data["target_files"]
+    assert len(data["steps"]) >= 4
+    assert data["critic_approved"] is True

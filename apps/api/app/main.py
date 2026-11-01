@@ -1,19 +1,22 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+from collections.abc import AsyncGenerator
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from .change_analysis import analyze_diff
 from .critic import review_diff, review_workspace
-from .domain import TaskSpec
+from .deliberation import DeliberationCouncil
+from .domain import RunStatus, TaskSpec
 from .evaluation import IndependentEvaluator
 from .llm import build_advisor
 from .policy import ToolPolicy
@@ -21,6 +24,7 @@ from .providers import DeterministicProvider, PlanRequest
 from .runner import AgentRun, resume_run
 from .security import SecurityHeadersMiddleware, allowed_origins
 from .store import get_default_store
+from .telemetry import RunEvent, get_event_bus
 from .tools import build_default_registry
 
 logger = logging.getLogger("agentic_software_engineer")
@@ -108,6 +112,57 @@ def get_run(run_id: str) -> dict[str, Any]:
     return data
 
 
+@app.get("/api/v1/runs/{run_id}/stream")
+async def stream_run_events(run_id: str) -> StreamingResponse:
+    checkpoint = _store.get_checkpoint(run_id)
+    if not checkpoint:
+        raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found.")
+
+    bus = get_event_bus()
+
+    async def event_generator() -> AsyncGenerator[str, None]:
+        # 1. Replay past events
+        for ev in bus.get_history(run_id):
+            yield ev.to_sse()
+
+        # 2. If already in terminal status, complete stream
+        terminal_statuses = (
+            RunStatus.COMPLETED.value,
+            RunStatus.FAILED.value,
+            RunStatus.AWAITING_APPROVAL.value,
+            RunStatus.RECONCILIATION_REQUIRED.value,
+        )
+        if checkpoint.status.value in terminal_statuses:
+            return
+
+        # 3. Stream live events
+        queue: asyncio.Queue[RunEvent | None] = asyncio.Queue(maxsize=100)
+        bus.register_queue(run_id, queue)
+        try:
+            while True:
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=10.0)
+                    if event is None:
+                        break
+                    yield event.to_sse()
+                    if event.payload.get("status") in terminal_statuses:
+                        break
+                except TimeoutError:
+                    yield ": keep-alive\n\n"
+        finally:
+            bus.unregister_queue(run_id, queue)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
 @app.post("/api/v1/runs/{run_id}/resume")
 def resume(run_id: str, request: ResumeRequest) -> dict[str, object]:
     try:
@@ -172,5 +227,30 @@ def get_latest_evaluation() -> dict[str, Any]:
     report_file = Path("evaluation_reports/evaluation_report.json")
     if not report_file.exists():
         raise HTTPException(status_code=404, detail="No evaluation report generated yet.")
+    data: dict[str, Any] = json.loads(report_file.read_text(encoding="utf-8"))
+    return data
+
+
+@app.post("/api/v1/deliberate")
+def deliberate(request: RunRequest) -> dict[str, Any]:
+    council = DeliberationCouncil()
+    res = council.deliberate(request.task, repo_root=request.task.repository)
+    return {
+        "task_title": res.task_title,
+        "consensus_reached": res.consensus_reached,
+        "iterations_used": res.iterations_used,
+        "summary": res.summary,
+        "target_files": list(res.architect_proposal.target_files),
+        "steps": list(res.architect_proposal.proposed_steps),
+        "risk_score": res.critic_verdict.risk_score,
+        "critic_approved": res.critic_verdict.approved,
+    }
+
+
+@app.get("/api/v1/evaluations/swe-bench/latest")
+def get_latest_swe_bench() -> dict[str, Any]:
+    report_file = Path("evaluation_reports/swe_bench_report.json")
+    if not report_file.exists():
+        raise HTTPException(status_code=404, detail="No SWE-bench evaluation report generated yet.")
     data: dict[str, Any] = json.loads(report_file.read_text(encoding="utf-8"))
     return data

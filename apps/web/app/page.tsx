@@ -128,6 +128,48 @@ export default function Home() {
   // Execution result state
   const [result, setResult] = useState<RunResult | null>(null);
   const [recentRuns, setRecentRuns] = useState<Array<{ run_id: string; title: string; status: string; updated_at: string }>>([]);
+  const [isStreaming, setIsStreaming] = useState(false);
+
+  // Real-time SSE Telemetry listener
+  useEffect(() => {
+    if (!result?.run_id) return;
+    const terminalStatuses = ["completed", "failed", "awaiting_approval", "reconciliation_required"];
+    if (terminalStatuses.includes(result.status || "")) {
+      setIsStreaming(false);
+      return;
+    }
+
+    setIsStreaming(true);
+    const eventSource = new EventSource(`${API}/api/v1/runs/${result.run_id}/stream`);
+
+    eventSource.onmessage = (e) => {
+      try {
+        const parsed = JSON.parse(e.data);
+        if (parsed.event_type?.startsWith("status:")) {
+          const newStatus = parsed.payload?.status;
+          if (newStatus) {
+            setResult((prev) => (prev ? { ...prev, status: newStatus } : null));
+            if (terminalStatuses.includes(newStatus)) {
+              setIsStreaming(false);
+              eventSource.close();
+            }
+          }
+        }
+      } catch {
+        // Heartbeat comment or non-json message
+      }
+    };
+
+    eventSource.onerror = () => {
+      setIsStreaming(false);
+      eventSource.close();
+    };
+
+    return () => {
+      setIsStreaming(false);
+      eventSource.close();
+    };
+  }, [result?.run_id, result?.status]);
 
   // Diff inspection state
   const [diffInput, setDiffInput] = useState(
@@ -376,7 +418,15 @@ export default function Home() {
           <section className="panel">
             <div className="panel-title">
               <span>Execution State & Evidence</span>
-              {result?.status && <span className={`status ${result.status}`}>{result.status}</span>}
+              <div style={{ display: "flex", gap: "10px", alignItems: "center" }}>
+                {isStreaming && (
+                  <span style={{ color: "#34d399", fontSize: 11, display: "flex", alignItems: "center", gap: 5 }}>
+                    <span style={{ display: "inline-block", width: 7, height: 7, borderRadius: "50%", background: "#34d399" }} />
+                    Live SSE Telemetry
+                  </span>
+                )}
+                {result?.status && <span className={`status ${result.status}`}>{result.status}</span>}
+              </div>
             </div>
 
             {!result ? (
