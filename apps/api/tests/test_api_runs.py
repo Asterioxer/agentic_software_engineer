@@ -8,7 +8,7 @@ client = TestClient(app)
 
 
 def test_api_list_and_get_runs(tmp_path: Path) -> None:
-    (tmp_path / "hello.py").write_text("print('hello')")
+    (tmp_path / "hello.py").write_text("print('hello')", encoding="utf-8")
     create_resp = client.post(
         "/api/v1/runs",
         json={
@@ -62,3 +62,32 @@ def test_api_resume_endpoint(tmp_path: Path) -> None:
     assert resume_resp.status_code == 200
     resumed = resume_resp.json()
     assert resumed["status"] == "completed"
+
+
+def test_api_critic_review_diff_endpoint() -> None:
+    diff = """--- a/src/safe.py
++++ b/src/safe.py
+@@ -1,1 +1,2 @@
+ x = 1
++token = 'sk_live_1234567890abcdef'
+"""
+    resp = client.post("/api/v1/critic/review-diff", json={"diff": diff})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["approved"] is False
+    assert len(data["findings"]) >= 1
+    assert "Review rejected" in data["summary"]
+
+
+def test_api_critic_review_workspace_endpoint(tmp_path: Path) -> None:
+    file = tmp_path / "main.py"
+    file.write_text("def run(): return 42\n", encoding="utf-8")
+
+    resp = client.post(
+        "/api/v1/critic/review-workspace",
+        json={"repository": str(tmp_path), "files": ["main.py"]},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["approved"] is True
+    assert data["risk_score"] == 0.0

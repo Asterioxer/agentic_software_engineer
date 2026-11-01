@@ -12,6 +12,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from .change_analysis import analyze_diff
+from .critic import review_diff, review_workspace
 from .domain import TaskSpec
 from .evaluation import IndependentEvaluator
 from .llm import build_advisor
@@ -42,7 +43,9 @@ app.add_middleware(
 async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
     if isinstance(exc, HTTPException):
         return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
-    logger.exception("Unhandled server exception on %s %s: %s", request.method, request.url.path, exc)
+    logger.exception(
+        "Unhandled server exception on %s %s: %s", request.method, request.url.path, exc
+    )
     return JSONResponse(
         status_code=500,
         content={"detail": "An internal server error occurred while processing the request."},
@@ -69,6 +72,15 @@ class DiffRequest(BaseModel):
 class AdvisoryRequest(BaseModel):
     task: str
     repository_context: str = ""
+
+
+class CriticDiffRequest(BaseModel):
+    diff: str = Field(min_length=1, max_length=200_000)
+
+
+class CriticWorkspaceRequest(BaseModel):
+    repository: str = Field(min_length=1, max_length=500)
+    files: list[str] = Field(default_factory=list, max_length=50)
 
 
 @app.get("/api/health")
@@ -119,6 +131,18 @@ def analyze(request: DiffRequest) -> dict[str, object]:
         "total_deletions": result.total_deletions,
         "files": [item.__dict__ for item in result.files],
     }
+
+
+@app.post("/api/v1/critic/review-diff")
+def critic_review_diff(request: CriticDiffRequest) -> dict[str, Any]:
+    review = review_diff(request.diff)
+    return review.to_dict()
+
+
+@app.post("/api/v1/critic/review-workspace")
+def critic_review_workspace(request: CriticWorkspaceRequest) -> dict[str, Any]:
+    review = review_workspace(request.repository, request.files)
+    return review.to_dict()
 
 
 @app.post("/api/v1/advisory")

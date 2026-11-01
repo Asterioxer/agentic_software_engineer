@@ -1,6 +1,11 @@
 from pathlib import Path
 
-from app.verification import verify_proof_of_test, verify_syntax, verify_workspace
+from app.verification import (
+    verify_proof_of_test,
+    verify_security_critic,
+    verify_syntax,
+    verify_workspace,
+)
 
 
 def test_verify_workspace(tmp_path: Path) -> None:
@@ -57,3 +62,16 @@ def test_verify_workspace_escapes_boundary(tmp_path: Path) -> None:
     assert len(results) == 1
     assert not results[0].passed
     assert "escapes the workspace root boundary" in results[0].detail
+
+
+def test_verify_security_critic(tmp_path: Path) -> None:
+    safe_py = tmp_path / "safe.py"
+    safe_py.write_text("def safe_func(): return 42\n", encoding="utf-8")
+    res_safe = verify_security_critic(safe_py)
+    assert res_safe is not None and res_safe.passed
+
+    insecure_py = tmp_path / "insecure.py"
+    insecure_py.write_text("API_KEY = 'sk_live_1234567890abcdef'\n", encoding="utf-8")
+    res_insecure = verify_security_critic(insecure_py)
+    assert res_insecure is not None and not res_insecure.passed
+    assert "Security critic rejected" in res_insecure.detail

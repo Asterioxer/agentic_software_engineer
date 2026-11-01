@@ -11,6 +11,7 @@ from .code_context import retrieve_relevant_context
 from .command_runner import CommandRunner
 from .domain import EvidenceRecord
 from .execution import WorkspaceAction, WorkspaceExecutor
+from .patch import PatchApplier
 from .repository_service import summarize_repository
 from .verification_pipeline import run_verification
 
@@ -31,6 +32,13 @@ class WorkspacePlanArgs(BaseModel):
     kind: Literal["write", "delete"] = Field(default="write")
     path: str = Field(default="agent-plan.txt", min_length=1, max_length=500)
     content: str | None = Field(default=None, max_length=100_000)
+
+
+class WorkspacePatchArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    repository: str | None = Field(default=None, max_length=500)
+    diff: str = Field(min_length=1, max_length=200_000)
+    dry_run: bool = True
 
 
 class CommandRunArgs(BaseModel):
@@ -142,6 +150,22 @@ def _handle_workspace_plan(args: dict[str, Any]) -> dict[str, Any]:
     return action_result.__dict__
 
 
+def _handle_workspace_patch(args: dict[str, Any]) -> dict[str, Any]:
+    repo = str(args.get("repository") or ".")
+    diff = str(args.get("diff", ""))
+    dry_run = bool(args.get("dry_run", True))
+
+    applier = PatchApplier(repo, dry_run=dry_run)
+    res = applier.apply_diff(diff)
+    return {
+        "applied": res.applied,
+        "modified_files": res.modified_files,
+        "file_hashes": res.file_hashes,
+        "error": res.error,
+        "detail": res.detail,
+    }
+
+
 def _handle_command_run(args: dict[str, Any]) -> dict[str, Any]:
     repo = str(args.get("repository") or ".")
     command_id = str(args.get("command_id", "git.diff.check"))
@@ -178,6 +202,14 @@ def build_default_registry() -> ToolRegistry:
             "Validate and execute one bounded workspace action (dry-run default)",
             _handle_workspace_plan,
             WorkspacePlanArgs,
+        )
+    )
+    registry.register(
+        ToolDefinition(
+            "workspace.patch",
+            "Atomically apply a unified diff across one or more workspace files",
+            _handle_workspace_patch,
+            WorkspacePatchArgs,
         )
     )
     registry.register(

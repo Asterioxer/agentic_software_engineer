@@ -19,13 +19,14 @@ class ToolPolicy:
         {
             "repository.inspect",
             "workspace.plan",
+            "workspace.patch",
             "command.run",
             "verification.run",
         }
     )
 
     def classify_risk(self, call: ToolCall) -> str:
-        if call.tool == "workspace.plan":
+        if call.tool in ("workspace.plan", "workspace.patch"):
             if not bool(call.arguments.get("dry_run", True)):
                 return "high"
             return "low"

@@ -8,8 +8,6 @@ Demonstrates:
 
 from __future__ import annotations
 
-import json
-import os
 import shutil
 import subprocess
 import sys
@@ -53,11 +51,28 @@ def setup_calculator_repo(temp_dir: Path) -> Path:
     # Initialize Git
     try:
         subprocess.run(["git", "init"], cwd=str(repo), check=True, capture_output=True)
-        subprocess.run(["git", "config", "user.name", "Agent Demo"], cwd=str(repo), check=True, capture_output=True)
-        subprocess.run(["git", "config", "user.email", "demo@antigravity.local"], cwd=str(repo), check=True, capture_output=True)
-        subprocess.run(["git", "add", "."], cwd=str(repo), check=True, capture_output=True)
-        subprocess.run(["git", "commit", "-m", "Initial commit"], cwd=str(repo), check=True, capture_output=True)
-    except Exception as exc:
+        subprocess.run(
+            ["git", "config", "user.name", "Agent Demo"],
+            cwd=str(repo),
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            ["git", "config", "user.email", "demo@antigravity.local"],
+            cwd=str(repo),
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            ["git", "add", "."], cwd=str(repo), check=True, capture_output=True
+        )
+        subprocess.run(
+            ["git", "commit", "-m", "Initial commit"],
+            cwd=str(repo),
+            check=True,
+            capture_output=True,
+        )
+    except (subprocess.SubprocessError, OSError) as exc:
         print(f"Warning: Git init skipped ({exc})")
 
     return repo
@@ -88,8 +103,12 @@ def run_demo_a(temp_dir: Path) -> dict[str, object]:
     result = run.execute()
 
     print(f"  Status: {result['status']}")
-    assert result["status"] == RunStatus.AWAITING_APPROVAL.value, "Must pause for approval"
-    print("  => Correctly halted at execution boundary: mutation requires operator sign-off.")
+    assert result["status"] == RunStatus.AWAITING_APPROVAL.value, (
+        "Must pause for approval"
+    )
+    print(
+        "  => Correctly halted at execution boundary: mutation requires operator sign-off."
+    )
 
     # Inspect planned steps
     plan = result.get("plan", [])
@@ -109,14 +128,20 @@ def run_demo_a(temp_dir: Path) -> dict[str, object]:
     )
 
     print(f"  Resumed Status: {resumed['status']}")
-    assert resumed["status"] == RunStatus.COMPLETED.value, "Must complete after approval"
-    print("  => Successfully executed approved mutations and passed all verification gates.")
+    assert resumed["status"] == RunStatus.COMPLETED.value, (
+        "Must complete after approval"
+    )
+    print(
+        "  => Successfully executed approved mutations and passed all verification gates."
+    )
 
     # Step 3: Inspect Durable Operation Journal
     ops = store.list_operations_for_run(run.run_id)
     print(f"\n[Phase 3: Durable Operation Journal Records ({len(ops)} operations)]")
     for op in ops:
-        print(f"  - Op ID: {op.operation_id} | Step: {op.step_id} | State: {op.state.value} | Key: {op.idempotency_key[:8]}...")
+        print(
+            f"  - Op ID: {op.operation_id} | Step: {op.step_id} | State: {op.state.value} | Key: {op.idempotency_key[:8]}..."
+        )
         if op.postcondition_hash:
             print(f"    Postcondition Hash: {op.postcondition_hash[:16]}...")
 
@@ -189,7 +214,9 @@ def main() -> None:
         print("=" * 70)
         print(f"Demo A (Approved Execution): {demo_a_result['status'].upper()}")
         print(f"Demo B (Honest Failure Refusal): {demo_b_result['status'].upper()}")
-        print("\nAll demonstration requirements verified successfully without synthetic shortcuts.\n")
+        print(
+            "\nAll demonstration requirements verified successfully without synthetic shortcuts.\n"
+        )
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
 

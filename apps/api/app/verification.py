@@ -92,9 +92,7 @@ def verify_proof_of_test(target: Path) -> VerificationResult | None:
         if (
             isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
             and node.name.startswith("test_")
-            or isinstance(node, ast.ClassDef)
-            and node.name.startswith("Test")
-        ):
+        ) or (isinstance(node, ast.ClassDef) and node.name.startswith("Test")):
             test_count += 1
 
     if test_count == 0:
@@ -111,8 +109,36 @@ def verify_proof_of_test(target: Path) -> VerificationResult | None:
     )
 
 
+def verify_security_critic(target: Path) -> VerificationResult | None:
+    """Run automated security critic rules against code files."""
+    if target.suffix.lower() not in (".py", ".js", ".ts", ".tsx", ".jsx"):
+        return None
+
+    from .critic import review_code_snippet
+
+    try:
+        content = target.read_text(encoding="utf-8")
+        findings = review_code_snippet(content, file_path=target.name)
+    except (OSError, ValueError):
+        return None
+
+    critical_or_high = [f for f in findings if f.severity in ("CRITICAL", "HIGH")]
+    if critical_or_high:
+        reasons = "; ".join(f"[{f.rule_id}] {f.description}" for f in critical_or_high[:2])
+        return VerificationResult(
+            check=f"security_critic:{target.name}",
+            passed=False,
+            detail=f"Security critic rejected {target.name}: {reasons}",
+        )
+    return VerificationResult(
+        check=f"security_critic:{target.name}",
+        passed=True,
+        detail=f"Security critic passed for {target.name}.",
+    )
+
+
 def verify_workspace(root: str, expected_files: list[str]) -> list[VerificationResult]:
-    """Execute multi-stage workspace verification: existence, boundary, syntax, and proof-of-test."""
+    """Execute multi-stage workspace verification: existence, boundary, syntax, proof-of-test, and security."""
     base = Path(root).resolve()
     results: list[VerificationResult] = []
 
@@ -156,5 +182,9 @@ def verify_workspace(root: str, expected_files: list[str]) -> list[VerificationR
             test_check = verify_proof_of_test(target)
             if test_check:
                 results.append(test_check)
+
+            critic_check = verify_security_critic(target)
+            if critic_check:
+                results.append(critic_check)
 
     return results
