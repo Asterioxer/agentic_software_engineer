@@ -140,3 +140,15 @@ def test_websocket_connect_ping_and_approval(tmp_path: Path) -> None:
         assert action_resp is not None
         assert action_resp.get("action") == "approve"
         assert action_resp.get("status") == "completed"
+
+        # Test operator steering action
+        websocket.send_json({"action": "steer", "guidance": "Focus verification on security"})
+        steer_resp = None
+        for _ in range(15):
+            msg = websocket.receive_json()
+            if msg.get("action") == "steer":
+                steer_resp = msg
+                break
+        assert steer_resp is not None
+        assert steer_resp.get("status") == "guidance_recorded"
+        assert steer_resp.get("guidance") == "Focus verification on security"

@@ -139,3 +139,16 @@ def test_cli_export_dataset(tmp_path: Path) -> None:
     code = main(["export-dataset", "--out", str(out_file), "--db", db_path])
     assert code == 0
     assert out_file.exists()
+
+
+def test_cli_graph(tmp_path: Path) -> None:
+    (tmp_path / "mod_a.py").write_text("def a(): pass\n", encoding="utf-8")
+    (tmp_path / "mod_b.py").write_text("import mod_a\ndef b(): mod_a.a()\n", encoding="utf-8")
+
+    # Full graph summary
+    code = main(["graph", str(tmp_path)])
+    assert code == 0
+
+    # Blast radius on mod_a.py
+    code = main(["graph", str(tmp_path), "--target", "mod_a.py"])
+    assert code == 0

@@ -5,6 +5,7 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
+from .codegraph import CodeGraph
 from .critic import review_diff, review_workspace
 from .distillation.exporter import DatasetExporter
 from .domain import RunStatus, TaskSpec
@@ -228,6 +229,35 @@ def cmd_export_dataset(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_graph(args: argparse.Namespace) -> int:
+    repo_path = Path(args.repo).resolve()
+    if not repo_path.is_dir():
+        print(f"Error: Repository path '{args.repo}' does not exist.")
+        return 1
+    graph = CodeGraph(repo_path).build()
+    if args.target:
+        radius = graph.get_blast_radius(args.target)
+        print(f"\n[Architectural Blast Radius: {radius.target_file}]")
+        print(f"Impact Level: {radius.impact_level}")
+        print(f"Total Impacted Files: {radius.total_impacted_files}")
+        if radius.direct_dependents:
+            print("\nDirect Dependents:")
+            for d in radius.direct_dependents:
+                print(f"  - {d}")
+        if radius.affected_tests:
+            print("\nAffected Tests:")
+            for t in radius.affected_tests:
+                print(f"  - {t}")
+    else:
+        summ = graph.summary()
+        print(f"\n[Semantic Code Graph: {summ.get('root')}]")
+        print(f"Files Indexed: {summ.get('files_indexed')}")
+        print(f"Unique Symbols: {summ.get('unique_symbols')}")
+        print(f"Definitions Count: {summ.get('definitions_count')}")
+        print(f"Dependency Edges: {summ.get('dependency_edges')}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="agentic-engineer",
@@ -306,6 +336,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_export.add_argument("--db", help="Path to SQLite database", default=None)
     p_export.set_defaults(func=cmd_export_dataset)
+
+    # graph
+    p_graph = subparsers.add_parser(
+        "graph", help="Analyze semantic code graph and architectural blast radius"
+    )
+    p_graph.add_argument("repo", help="Path to repository")
+    p_graph.add_argument(
+        "--target", help="Specific target file to compute blast radius for", default=None
+    )
+    p_graph.set_defaults(func=cmd_graph)
 
     return parser
 

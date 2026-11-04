@@ -110,3 +110,20 @@ def test_api_deliberate_endpoint(tmp_path: Path) -> None:
     assert "app/auth.py" in data["target_files"]
     assert len(data["steps"]) >= 4
     assert data["critic_approved"] is True
+
+
+def test_api_blast_radius_endpoint(tmp_path: Path) -> None:
+    (tmp_path / "core.py").write_text("def core_fn(): pass\n", encoding="utf-8")
+    (tmp_path / "service.py").write_text(
+        "import core\ndef svc(): core.core_fn()\n", encoding="utf-8"
+    )
+
+    resp = client.post(
+        "/api/v1/repository/blast-radius",
+        json={"repository": str(tmp_path), "target_file": "core.py"},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["target_file"] == "core.py"
+    assert "service.py" in data["direct_dependents"]
+    assert data["total_impacted_files"] >= 1

@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useEffect, useState } from "react";
+import { FormEvent, useEffect, useRef, useState } from "react";
 
 interface Verification {
   check: string;
@@ -112,24 +112,86 @@ interface DiffAnalysisResult {
   files: Array<{ path: string; additions: number; deletions: number; risk: string }>;
 }
 
+interface BlastRadiusResult {
+  target_file: string;
+  direct_dependents: string[];
+  transitive_dependents: string[];
+  affected_tests: string[];
+  impact_level: string;
+  total_impacted_files: number;
+}
+
+interface DeliberationResponse {
+  task: { title: string; description: string };
+  consensus_reached: boolean;
+  rounds_taken: number;
+  target_files: string[];
+  steps: Array<{ id: string; description: string; expected_files: string[] }>;
+  critic_approved: boolean;
+  critic_risk_score: number;
+  critic_findings: Array<{ rule_id: string; severity: string; description: string }>;
+  critic_summary: string;
+}
+
+interface DistillationMessage {
+  role: string;
+  content: string;
+}
+
+interface DistillationRecord {
+  messages: DistillationMessage[];
+  metadata: {
+    run_id: string;
+    task_title: string;
+    verification_checks_passed: number;
+    operations_count: number;
+  };
+}
+
 const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
 export default function Home() {
-  const [activeTab, setActiveTab] = useState<"execution" | "repository" | "diff" | "evaluation">("execution");
-  
+  const [activeTab, setActiveTab] = useState<
+    "execution" | "repository" | "deliberation" | "distillation" | "diff" | "evaluation"
+  >("execution");
+
   // Task input state
   const [title, setTitle] = useState("Implement guarded logging");
-  const [description, setDescription] = useState("Add an auditable execution logger with path verification and evidence collection.");
+  const [description, setDescription] = useState(
+    "Add an auditable execution logger with path verification and evidence collection."
+  );
   const [repository, setRepository] = useState("");
   const [dryRun, setDryRun] = useState(true);
   const [autoApprove, setAutoApprove] = useState(false);
   const [busy, setBusy] = useState(false);
-  
+
   // Execution result state
   const [result, setResult] = useState<RunResult | null>(null);
-  const [recentRuns, setRecentRuns] = useState<Array<{ run_id: string; title: string; status: string; updated_at: string }>>([]);
+  const [recentRuns, setRecentRuns] = useState<
+    Array<{ run_id: string; title: string; status: string; updated_at: string }>
+  >([]);
   const [isStreaming, setIsStreaming] = useState(false);
   const [liveLogs, setLiveLogs] = useState<Array<{ time: string; type: string; message: string }>>([]);
+  const [steerInput, setSteerInput] = useState("");
+  const activeWsRef = useRef<WebSocket | null>(null);
+
+  // Blast Radius state
+  const [blastTarget, setBlastTarget] = useState("");
+  const [blastRadius, setBlastRadius] = useState<BlastRadiusResult | null>(null);
+  const [blastBusy, setBlastBusy] = useState(false);
+
+  // Deliberation state
+  const [delibTitle, setDelibTitle] = useState("Architect authentication tokens");
+  const [delibDesc, setDelibDesc] = useState(
+    "Design and implement secure JWT token signing and verification with zero hardcoded secrets."
+  );
+  const [delibRepo, setDelibRepo] = useState("");
+  const [delibResult, setDelibResult] = useState<DeliberationResponse | null>(null);
+  const [delibBusy, setDelibBusy] = useState(false);
+
+  // Distillation state
+  const [distillRecords, setDistillRecords] = useState<DistillationRecord[]>([]);
+  const [distillBusy, setDistillBusy] = useState(false);
 
   // Real-time WebSocket & SSE Telemetry listener
   useEffect(() => {
@@ -146,7 +208,8 @@ export default function Home() {
 
     function handleEvent(parsed: { event_type?: string; payload?: unknown }) {
       const now = new Date().toLocaleTimeString();
-      const payloadStr = typeof parsed.payload === "string" ? parsed.payload : JSON.stringify(parsed.payload || {});
+      const payloadStr =
+        typeof parsed.payload === "string" ? parsed.payload : JSON.stringify(parsed.payload || {});
       setLiveLogs((prev) => [
         ...prev.slice(-99),
         {
@@ -187,13 +250,17 @@ export default function Home() {
     try {
       const wsUrl = `${API.replace(/^http/, "ws")}/api/v1/ws/runs/${result.run_id}`;
       ws = new WebSocket(wsUrl);
+      activeWsRef.current = ws;
+
       ws.onmessage = (e) => {
         try {
           const parsed = JSON.parse(e.data);
           handleEvent(parsed);
           if (parsed.event_type === "action_result") {
             loadRuns();
-            fetch(`${API}/api/v1/runs/${result.run_id}`).then((r) => r.json()).then(setResult);
+            fetch(`${API}/api/v1/runs/${result.run_id}`)
+              .then((r) => r.json())
+              .then(setResult);
           }
         } catch {
           // ignore
@@ -202,6 +269,7 @@ export default function Home() {
       ws.onerror = () => {
         if (ws) ws.close();
         ws = null;
+        activeWsRef.current = null;
         startSSE();
       };
     } catch {
@@ -211,6 +279,7 @@ export default function Home() {
     return () => {
       setIsStreaming(false);
       if (ws) ws.close();
+      activeWsRef.current = null;
       if (eventSource) eventSource.close();
     };
   }, [result?.run_id, result?.status]);
@@ -292,6 +361,109 @@ export default function Home() {
     }
   }
 
+  function handleSendSteer(event: FormEvent) {
+    event.preventDefault();
+    if (!steerInput.trim()) return;
+    const msg = steerInput.trim();
+
+    if (activeWsRef.current && activeWsRef.current.readyState === WebSocket.OPEN) {
+      activeWsRef.current.send(JSON.stringify({ action: "steer", guidance: msg }));
+    }
+
+    setLiveLogs((prev) => [
+      ...prev,
+      {
+        time: new Date().toLocaleTimeString(),
+        type: "operator:steer",
+        message: msg,
+      },
+    ]);
+    setSteerInput("");
+  }
+
+  async function calculateBlastRadius() {
+    if (!repository.trim() || !blastTarget.trim()) {
+      alert("Please enter both a Repository Path and Target File.");
+      return;
+    }
+    setBlastBusy(true);
+    try {
+      const res = await fetch(`${API}/api/v1/repository/blast-radius`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          repository: repository.trim(),
+          target_file: blastTarget.trim(),
+        }),
+      });
+      if (res.ok) {
+        setBlastRadius(await res.json());
+      } else {
+        const err = await res.json();
+        alert(`Blast radius error: ${err.detail || "Failed to calculate"}`);
+      }
+    } catch (err) {
+      alert(`Request failed: ${err}`);
+    } finally {
+      setBlastBusy(false);
+    }
+  }
+
+  async function runDeliberationCouncil(event: FormEvent) {
+    event.preventDefault();
+    setDelibBusy(true);
+    try {
+      const res = await fetch(`${API}/api/v1/deliberate`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          task: {
+            title: delibTitle,
+            description: delibDesc,
+            repository: delibRepo.trim() || null,
+          },
+        }),
+      });
+      if (res.ok) {
+        setDelibResult(await res.json());
+      } else {
+        const err = await res.json();
+        alert(`Deliberation error: ${err.detail || "Failed"}`);
+      }
+    } catch (err) {
+      alert(`Deliberation request error: ${err}`);
+    } finally {
+      setDelibBusy(false);
+    }
+  }
+
+  async function loadDistillationRecords() {
+    setDistillBusy(true);
+    try {
+      const res = await fetch(`${API}/api/v1/distillation/export?limit=1000`, { method: "POST" });
+      if (res.ok) {
+        const data = await res.json();
+        setDistillRecords(data.records || []);
+      }
+    } catch (err) {
+      alert(`Distillation extraction error: ${err}`);
+    } finally {
+      setDistillBusy(false);
+    }
+  }
+
+  function downloadDistillationJsonl() {
+    if (distillRecords.length === 0) return;
+    const content = distillRecords.map((r) => JSON.stringify(r)).join("\n");
+    const blob = new Blob([content], { type: "application/jsonlines" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `distillation_dataset_${Date.now()}.jsonl`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
   async function analyzeDiff() {
     setDiffBusy(true);
     try {
@@ -313,7 +485,7 @@ export default function Home() {
   async function runEvaluations() {
     setEvalBusy(true);
     try {
-      const res = await fetch(`${API}/api/v1/evaluations/run`, { method: "POST" });
+      const res = await fetch(`${API}/api/v1/evaluation/run`, { method: "POST" });
       if (res.ok) {
         setEvalReport(await res.json());
       }
@@ -327,11 +499,11 @@ export default function Home() {
   return (
     <main className="shell">
       <header>
-        <div className="eyebrow">AUTONOMOUS SOFTWARE ENGINEERING · CONTROL PLANE</div>
+        <div className="eyebrow">AUTONOMOUS SOFTWARE ENGINEERING · ENTERPRISE CONTROL PLANE</div>
         <h1>Observe. Plan. Guard. Verify.</h1>
         <p className="lede">
-          Deterministic execution boundary, independent verification gates, durable Operation Journal, and
-          fail-closed tool safety.
+          Deterministic execution boundary, independent verification gates, durable Operation Journal,
+          real-time WebSocket steering, and model distillation.
         </p>
       </header>
 
@@ -347,7 +519,22 @@ export default function Home() {
           className={`tab ${activeTab === "repository" ? "active" : ""}`}
           onClick={() => setActiveTab("repository")}
         >
-          Repository Context
+          Repository & Blast Radius
+        </button>
+        <button
+          className={`tab ${activeTab === "deliberation" ? "active" : ""}`}
+          onClick={() => setActiveTab("deliberation")}
+        >
+          Multi-Agent Council
+        </button>
+        <button
+          className={`tab ${activeTab === "distillation" ? "active" : ""}`}
+          onClick={() => {
+            setActiveTab("distillation");
+            if (distillRecords.length === 0) loadDistillationRecords();
+          }}
+        >
+          Model Distillation
         </button>
         <button
           className={`tab ${activeTab === "diff" ? "active" : ""}`}
@@ -369,7 +556,7 @@ export default function Home() {
           {/* Start Run Panel */}
           <form className="panel" onSubmit={submitRun}>
             <div className="panel-title">Task Specification</div>
-            
+
             <label htmlFor="task-title">Task Title</label>
             <input
               id="task-title"
@@ -401,8 +588,8 @@ export default function Home() {
                 checked={dryRun}
                 onChange={(e) => setDryRun(e.target.checked)}
               />
-              <label htmlFor="dry-run" style={{ margin: 0, cursor: "pointer" }}>
-                Dry-run mode (default; preview changes without modifying files)
+              <label htmlFor="dry-run">
+                <strong>Dry-run safe preview</strong> (no modifications without explicit approval)
               </label>
             </div>
 
@@ -413,41 +600,53 @@ export default function Home() {
                 checked={autoApprove}
                 onChange={(e) => setAutoApprove(e.target.checked)}
               />
-              <label htmlFor="auto-approve" style={{ margin: 0, cursor: "pointer" }}>
-                Auto-approve real mutations (bypass operator pause gate)
+              <label htmlFor="auto-approve">
+                <strong>Auto-approve mutations</strong> (bypass approval gate for non-dry-runs)
               </label>
             </div>
 
             <button type="submit" disabled={busy}>
-              {busy ? "Running guarded agent..." : "Dispatch Guarded Task"}
+              {busy ? "Executing Task..." : "Dispatch Task"}
             </button>
 
-            <p className="hint">
-              Tools execute shell-free (`shell=False`) with strict timeouts, SQLite WAL journaling, and idempotency guarantees.
-            </p>
-
-            {/* Recent runs list */}
+            {/* Recent Runs History */}
             {recentRuns.length > 0 && (
-              <div style={{ marginTop: 24 }}>
+              <div style={{ marginTop: 24, borderTop: "1px solid #1f2b3b", paddingTop: 16 }}>
                 <div style={{ fontSize: 12, fontWeight: 700, color: "#94a3b8", marginBottom: 8 }}>
-                  Recent Runs ({recentRuns.length})
+                  RECENT EXECUTIONS ({recentRuns.length})
                 </div>
-                <div style={{ display: "grid", gap: 6, maxHeight: 150, overflowY: "auto" }}>
-                  {recentRuns.slice(0, 5).map((r) => (
+                <div style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: 150, overflowY: "auto" }}>
+                  {recentRuns.map((r) => (
                     <div
                       key={r.run_id}
+                      onClick={() => {
+                        fetch(`${API}/api/v1/runs/${r.run_id}`)
+                          .then((res) => res.json())
+                          .then((d) => {
+                            setResult(d);
+                            if (d.task?.repository) setRepository(d.task.repository);
+                          });
+                      }}
                       style={{
-                        fontSize: 11,
-                        padding: "6px 8px",
-                        background: "#090e16",
-                        borderRadius: 6,
-                        border: "1px solid #1a2433",
                         display: "flex",
                         justifyContent: "space-between",
-                        alignItems: "center",
+                        padding: "6px 10px",
+                        background: "#0c121d",
+                        border: "1px solid #1c2636",
+                        borderRadius: 6,
+                        cursor: "pointer",
+                        fontSize: 12,
                       }}
                     >
-                      <span style={{ color: "#cbd5e1", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 220 }}>
+                      <span
+                        style={{
+                          color: "#cbd5e1",
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                          whiteSpace: "nowrap",
+                          maxWidth: 220,
+                        }}
+                      >
                         {r.title}
                       </span>
                       <span className={`status ${r.status}`}>{r.status}</span>
@@ -466,7 +665,7 @@ export default function Home() {
                 {isStreaming && (
                   <span style={{ color: "#34d399", fontSize: 11, display: "flex", alignItems: "center", gap: 5 }}>
                     <span style={{ display: "inline-block", width: 7, height: 7, borderRadius: "50%", background: "#34d399" }} />
-                    Live SSE Telemetry
+                    Live Duplex Telemetry
                   </span>
                 )}
                 {result?.status && <span className={`status ${result.status}`}>{result.status}</span>}
@@ -485,7 +684,7 @@ export default function Home() {
                     <div>
                       <strong>Operator Approval Required</strong>
                       <p>
-                        A mutating workspace action has been proposed and halted at the execution boundary. Operator approval will execute bounded changes. Rejection leaves repository unmodified.
+                        A mutating workspace action has been proposed and halted at the execution boundary. Operator approval will execute bounded changes.
                       </p>
                     </div>
                     <div className="approval-actions">
@@ -515,15 +714,13 @@ export default function Home() {
                       <span style={{ width: 8, height: 8, borderRadius: "50%", background: isStreaming ? "#10b981" : "#64748b" }} />
                       REAL-TIME DUPLEX TELEMETRY & CONSOLE {isStreaming && "(LIVE STREAMING)"}
                     </span>
-                    <div style={{ display: "flex", gap: 8 }}>
-                      <button
-                        type="button"
-                        onClick={() => setLiveLogs([])}
-                        style={{ fontSize: 11, padding: "2px 8px", background: "#1e293b", color: "#94a3b8", border: "none", borderRadius: 4, cursor: "pointer" }}
-                      >
-                        Clear Console
-                      </button>
-                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setLiveLogs([])}
+                      style={{ fontSize: 11, padding: "2px 8px", background: "#1e293b", color: "#94a3b8", border: "none", borderRadius: 4, cursor: "pointer" }}
+                    >
+                      Clear Console
+                    </button>
                   </div>
                   <div style={{ maxHeight: 180, overflowY: "auto", fontFamily: "monospace", fontSize: 11, color: "#a5f3fc", lineHeight: 1.6, padding: "6px 8px", background: "#020408", borderRadius: 4 }}>
                     {liveLogs.length === 0 ? (
@@ -532,7 +729,7 @@ export default function Home() {
                       liveLogs.map((log, idx) => (
                         <div key={idx} style={{ display: "flex", gap: 8 }}>
                           <span style={{ color: "#64748b", flexShrink: 0 }}>[{log.time}]</span>
-                          <span style={{ color: log.type.includes("fail") ? "#f87171" : log.type.includes("pass") ? "#4ade80" : "#38bdf8", flexShrink: 0 }}>
+                          <span style={{ color: log.type.includes("fail") ? "#f87171" : log.type.includes("pass") ? "#4ade80" : log.type.includes("steer") ? "#eab308" : "#38bdf8", flexShrink: 0 }}>
                             {log.type}:
                           </span>
                           <span style={{ color: "#e2e8f0", wordBreak: "break-all" }}>{log.message}</span>
@@ -540,6 +737,23 @@ export default function Home() {
                       ))
                     )}
                   </div>
+
+                  {/* Interactive Operator Steering Input */}
+                  <form onSubmit={handleSendSteer} style={{ display: "flex", gap: 8, marginTop: 8 }}>
+                    <input
+                      type="text"
+                      value={steerInput}
+                      onChange={(e) => setSteerInput(e.target.value)}
+                      placeholder="Live steer: inject guidance or constraints mid-flight..."
+                      style={{ flex: 1, fontSize: 12, padding: "6px 10px", background: "#0f172a", border: "1px solid #334155", borderRadius: 4, color: "#f8fafc" }}
+                    />
+                    <button
+                      type="submit"
+                      style={{ fontSize: 12, padding: "6px 14px", background: "#0284c7", color: "#fff", border: "none", borderRadius: 4, cursor: "pointer" }}
+                    >
+                      Steer
+                    </button>
+                  </form>
                 </div>
 
                 {/* Planned Steps */}
@@ -548,129 +762,50 @@ export default function Home() {
                     <h3 style={{ fontSize: 13, textTransform: "uppercase", color: "#64748b", margin: "16px 0 8px" }}>
                       Plan Steps ({result.plan.length})
                     </h3>
-                    <div className="step-list">
-                      {result.plan.map((step) => (
-                        <div key={step.id} className="step-card">
-                          <div className="step-header">
-                            <span className="step-id">Step: {step.id}</span>
-                            <span className={`status ${step.status ?? "pending"}`}>{step.status ?? "pending"}</span>
+                    <div style={{ display: "grid", gap: 8 }}>
+                      {result.plan.map((s) => (
+                        <div key={s.id} className="timeline-item">
+                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                            <strong>[{s.id}] {s.tool ?? "internal"}</strong>
+                            <span className={`status ${s.status ?? "pending"}`}>{s.status ?? "pending"}</span>
                           </div>
-                          <p className="step-desc">{step.description}</p>
-                          <div className="step-meta">
-                            {step.tool && <span>Tool: <code>{step.tool}</code></span>}
-                            {step.requires_approval && <span style={{ color: "#fbbf24" }}>Approval Gated</span>}
-                            {step.validation_criteria && step.validation_criteria.length > 0 && (
-                              <span>Validation: {step.validation_criteria[0]}</span>
-                            )}
-                          </div>
+                          <p style={{ margin: "4px 0 0", color: "#94a3b8", fontSize: 12 }}>{s.description}</p>
+                          {s.validation_criteria && (
+                            <div style={{ fontSize: 11, color: "#64748b", marginTop: 4 }}>
+                              Criteria: {s.validation_criteria.join(" · ")}
+                            </div>
+                          )}
                         </div>
                       ))}
                     </div>
                   </div>
                 )}
 
-                {/* Durable Operation Journal */}
-                {result.operations && result.operations.length > 0 && (
-                  <div>
-                    <h3 style={{ fontSize: 13, textTransform: "uppercase", color: "#64748b", margin: "24px 0 8px" }}>
-                      Durable Operation Journal ({result.operations.length})
-                    </h3>
-                    <table className="tool-table">
-                      <thead>
-                        <tr>
-                          <th>Operation ID</th>
-                          <th>Step</th>
-                          <th>Tool</th>
-                          <th>State</th>
-                          <th>Attempt</th>
-                          <th>Recovery / Idempotency</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {result.operations.map((op) => (
-                          <tr key={op.operation_id}>
-                            <td><code>{op.operation_id}</code></td>
-                            <td>{op.step_id}</td>
-                            <td><code>{op.tool}</code></td>
-                            <td><span className={`status ${op.state}`}>{op.state}</span></td>
-                            <td>#{op.execution_attempt}</td>
-                            <td style={{ fontSize: 11, color: "#94a3b8" }}>
-                              {op.recovery_status ? (
-                                <span style={{ color: "#38bdf8" }}>{op.recovery_status}</span>
-                              ) : (
-                                <code>key:{op.idempotency_key.slice(0, 8)}</code>
-                              )}
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                )}
-
-                {/* Independent Verification Checks */}
+                {/* Verification Gates */}
                 {result.verification && result.verification.length > 0 && (
-                  <div>
-                    <h3 style={{ fontSize: 13, textTransform: "uppercase", color: "#64748b", margin: "24px 0 8px" }}>
+                  <div style={{ marginTop: 20 }}>
+                    <h3 style={{ fontSize: 13, textTransform: "uppercase", color: "#64748b", margin: "0 0 8px" }}>
                       Independent Verification Checks ({result.verification.length})
                     </h3>
-                    <div className="checks">
-                      {result.verification.map((v) => (
-                        <div key={v.check} className={`check ${v.passed ? "pass" : "fail"}`}>
-                          <div className="check-icon">{v.passed ? "✓" : "×"}</div>
-                          <div className="check-body">
-                            <b>{v.check}</b>
-                            <small>{v.detail}</small>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
-
-                {/* Tool Execution Records */}
-                {result.evidence_records && result.evidence_records.length > 0 && (
-                  <div>
-                    <h3 style={{ fontSize: 13, textTransform: "uppercase", color: "#64748b", margin: "24px 0 8px" }}>
-                      Tool Audit Trail & Bounded Execution ({result.evidence_records.length})
-                    </h3>
-                    <table className="tool-table">
-                      <thead>
-                        <tr>
-                          <th>Tool Source</th>
-                          <th>Summary</th>
-                          <th>Status</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {result.evidence_records.map((rec, i) => (
-                          <tr key={i}>
-                            <td><code>{rec.source}</code></td>
-                            <td>{rec.summary}</td>
-                            <td>
-                              <span className={`risk-tag ${rec.passed ? "low" : "high"}`}>
-                                {rec.passed ? "PASSED" : "FAILED"}
-                              </span>
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                )}
-
-                {/* Event Timeline */}
-                {result.events && result.events.length > 0 && (
-                  <div>
-                    <h3 style={{ fontSize: 13, textTransform: "uppercase", color: "#64748b", margin: "24px 0 8px" }}>
-                      Lifecycle Timeline ({result.events.length})
-                    </h3>
-                    <div className="timeline">
-                      {result.events.map((e, idx) => (
-                        <div key={idx} className="timeline-event">
-                          <span className="timeline-seq">#{e.sequence}</span>
-                          <span className="timeline-status">{e.status}</span>
-                          <span className="timeline-msg">{e.message}</span>
+                    <div style={{ display: "grid", gap: 6 }}>
+                      {result.verification.map((v, i) => (
+                        <div
+                          key={i}
+                          style={{
+                            display: "flex",
+                            alignItems: "center",
+                            gap: 10,
+                            padding: "8px 12px",
+                            background: v.passed ? "rgba(16, 185, 129, 0.08)" : "rgba(239, 68, 68, 0.08)",
+                            border: `1px solid ${v.passed ? "#059669" : "#dc2626"}`,
+                            borderRadius: 6,
+                          }}
+                        >
+                          <span style={{ fontWeight: 800, color: v.passed ? "#34d399" : "#f87171" }}>
+                            {v.passed ? "✓ PASS" : "✗ FAIL"}
+                          </span>
+                          <span style={{ fontWeight: 600, color: "#e2e8f0", fontSize: 12 }}>{v.check}</span>
+                          <span style={{ color: "#94a3b8", fontSize: 11, marginLeft: "auto" }}>{v.detail}</span>
                         </div>
                       ))}
                     </div>
@@ -682,165 +817,313 @@ export default function Home() {
         </section>
       )}
 
-      {/* TAB 2: REPOSITORY CONTEXT */}
+      {/* TAB 2: REPOSITORY & BLAST RADIUS */}
       {activeTab === "repository" && (
-        <section className="panel">
-          <div className="panel-title">Repository Intelligence & Context Index</div>
-          {result?.repository ? (
-            <div>
-              <p style={{ color: "#94a3b8", fontSize: 13 }}>
-                Root: <code>{result.repository.root ?? "Workspace root"}</code> | Total files:{" "}
-                <b>{result.repository.file_count ?? 0}</b>
-              </p>
+        <section className="grid">
+          {/* Blast Radius Analyzer Panel */}
+          <div className="panel">
+            <div className="panel-title">Architectural Blast Radius Calculator</div>
+            <p className="hint" style={{ marginTop: 4, marginBottom: 16 }}>
+              Compute full dependency graph and identify downstream modules and test suites impacted by changes.
+            </p>
 
-              {/* Detected Frameworks */}
-              {result.repository.frameworks && result.repository.frameworks.length > 0 && (
-                <div style={{ margin: "16px 0" }}>
-                  <div style={{ fontSize: 12, fontWeight: 700, color: "#94a3b8", marginBottom: 8 }}>
-                    DETECTED FRAMEWORKS & RUNNERS
+            <label htmlFor="blast-repo">Repository Path</label>
+            <input
+              id="blast-repo"
+              value={repository}
+              onChange={(e) => setRepository(e.target.value)}
+              placeholder="e.g. C:/workspace/repo"
+            />
+
+            <label htmlFor="blast-target" style={{ marginTop: 12 }}>Target Source File</label>
+            <input
+              id="blast-target"
+              value={blastTarget}
+              onChange={(e) => setBlastTarget(e.target.value)}
+              placeholder="e.g. app/cli.py or src/auth.ts"
+            />
+
+            <button type="button" onClick={calculateBlastRadius} disabled={blastBusy} style={{ marginTop: 16 }}>
+              {blastBusy ? "Computing Blast Radius..." : "Calculate Blast Radius"}
+            </button>
+
+            {blastRadius && (
+              <div style={{ marginTop: 20, borderTop: "1px solid #1f2b3b", paddingTop: 16 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <span style={{ fontSize: 12, fontWeight: 700, color: "#94a3b8" }}>IMPACT ASSESSMENT</span>
+                  <span className={`risk-tag ${blastRadius.impact_level.toLowerCase()}`}>
+                    {blastRadius.impact_level} IMPACT ({blastRadius.total_impacted_files} files)
+                  </span>
+                </div>
+
+                <div style={{ marginTop: 12, fontSize: 12 }}>
+                  <div style={{ color: "#94a3b8", marginBottom: 4 }}>Direct Dependents ({blastRadius.direct_dependents.length}):</div>
+                  {blastRadius.direct_dependents.length === 0 ? (
+                    <div style={{ color: "#64748b" }}>None</div>
+                  ) : (
+                    blastRadius.direct_dependents.map((d) => (
+                      <div key={d} style={{ color: "#cbd5e1", fontFamily: "monospace", fontSize: 11 }}>
+                        • {d}
+                      </div>
+                    ))
+                  )}
+                </div>
+
+                <div style={{ marginTop: 12, fontSize: 12 }}>
+                  <div style={{ color: "#94a3b8", marginBottom: 4 }}>Affected Test Suites ({blastRadius.affected_tests.length}):</div>
+                  {blastRadius.affected_tests.length === 0 ? (
+                    <div style={{ color: "#64748b" }}>No direct test suites mapped</div>
+                  ) : (
+                    blastRadius.affected_tests.map((t) => (
+                      <div key={t} style={{ color: "#34d399", fontFamily: "monospace", fontSize: 11 }}>
+                        ✓ {t}
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Repository Summary Panel */}
+          <div className="panel">
+            <div className="panel-title">Repository Intelligence Summary</div>
+            {result?.repository ? (
+              <div>
+                <div className="summary-badges" style={{ marginTop: 12 }}>
+                  <span className="badge">Files Indexed: {result.repository.file_count}</span>
+                  {result.repository.frameworks?.map((f) => (
+                    <span key={f} className="badge" style={{ borderColor: "#3b82f6", color: "#60a5fa" }}>
+                      {f}
+                    </span>
+                  ))}
+                </div>
+
+                {/* Languages breakdown */}
+                {result.repository.languages && (
+                  <div style={{ margin: "20px 0" }}>
+                    <div style={{ fontSize: 12, fontWeight: 700, color: "#94a3b8", marginBottom: 8 }}>
+                      LANGUAGE DISTRIBUTION
+                    </div>
+                    <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+                      {Object.entries(result.repository.languages).map(([lang, count]) => (
+                        <div key={lang} style={{ background: "#0c121d", border: "1px solid #1c2636", padding: "6px 12px", borderRadius: 6 }}>
+                          <span style={{ fontWeight: 700, color: "#e2e8f0" }}>{lang}: </span>
+                          <span style={{ color: "#94a3b8" }}>{count} file(s)</span>
+                        </div>
+                      ))}
+                    </div>
                   </div>
-                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                    {result.repository.frameworks.map((fw) => (
-                      <span
-                        key={fw}
-                        style={{
-                          background: "rgba(56, 189, 248, 0.15)",
-                          color: "#38bdf8",
-                          border: "1px solid rgba(56, 189, 248, 0.3)",
-                          borderRadius: 6,
-                          padding: "4px 10px",
-                          fontSize: 12,
-                          fontWeight: 700,
-                        }}
-                      >
-                        {fw}
-                      </span>
-                    ))}
+                )}
+
+                {/* Discovered manifests */}
+                {result.repository.manifests && Object.keys(result.repository.manifests).length > 0 && (
+                  <div style={{ margin: "20px 0" }}>
+                    <div style={{ fontSize: 12, fontWeight: 700, color: "#94a3b8", marginBottom: 8 }}>
+                      DISCOVERED DEPENDENCY MANIFESTS
+                    </div>
+                    <div style={{ display: "grid", gap: 10 }}>
+                      {Object.entries(result.repository.manifests).map(([manifestFile, info]) => (
+                        <div key={manifestFile} style={{ background: "#090e16", border: "1px solid #1a2433", borderRadius: 8, padding: 12 }}>
+                          <div style={{ fontWeight: 700, color: "#e2e8f0", fontSize: 13, marginBottom: 6 }}>
+                            <code>{manifestFile}</code>
+                          </div>
+                          {info.dependencies && info.dependencies.length > 0 && (
+                            <div style={{ fontSize: 11, color: "#94a3b8" }}>
+                              Dependencies ({info.dependencies.length}):{" "}
+                              <span style={{ color: "#cbd5e1" }}>
+                                {info.dependencies.slice(0, 10).join(", ")}
+                                {info.dependencies.length > 10 ? "..." : ""}
+                              </span>
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className="empty">
+                No repository inspected in the current execution run. Specify a repository path to inspect.
+              </div>
+            )}
+          </div>
+        </section>
+      )}
+
+      {/* TAB 3: MULTI-AGENT DELIBERATION COUNCIL */}
+      {activeTab === "deliberation" && (
+        <section className="grid">
+          <form className="panel" onSubmit={runDeliberationCouncil}>
+            <div className="panel-title">Deliberation Council Intake</div>
+            <p className="hint" style={{ marginTop: 4, marginBottom: 16 }}>
+              Dispatches task through multi-agent consensus: Architect (decomposition) → Coder (implementation) → Security Critic (AST & pattern review).
+            </p>
+
+            <label htmlFor="delib-title">Task Title</label>
+            <input
+              id="delib-title"
+              value={delibTitle}
+              onChange={(e) => setDelibTitle(e.target.value)}
+              required
+            />
+
+            <label htmlFor="delib-desc" style={{ marginTop: 12 }}>Description & Architecture Goals</label>
+            <textarea
+              id="delib-desc"
+              value={delibDesc}
+              onChange={(e) => setDelibDesc(e.target.value)}
+              required
+            />
+
+            <label htmlFor="delib-repo" style={{ marginTop: 12 }}>Target Repository (Optional)</label>
+            <input
+              id="delib-repo"
+              value={delibRepo}
+              onChange={(e) => setDelibRepo(e.target.value)}
+              placeholder="e.g. C:/workspace/repo"
+            />
+
+            <button type="submit" disabled={delibBusy} style={{ marginTop: 16 }}>
+              {delibBusy ? "Council Deliberating..." : "Convene Council"}
+            </button>
+          </form>
+
+          <div className="panel">
+            <div className="panel-title">
+              <span>Council Deliberation Report</span>
+              {delibResult && (
+                <span className={`risk-tag ${delibResult.consensus_reached ? "low" : "high"}`}>
+                  {delibResult.consensus_reached ? "CONSENSUS REACHED" : "REJECTED BY CRITIC"}
+                </span>
+              )}
+            </div>
+
+            {!delibResult ? (
+              <div className="empty">
+                Submit a task to trigger multi-agent consensus between Architect, Coder, and Security Critic.
+              </div>
+            ) : (
+              <div style={{ marginTop: 12 }}>
+                <div style={{ display: "flex", gap: 12, marginBottom: 16 }}>
+                  <div style={{ background: "#090e16", border: "1px solid #1f2b3b", padding: 10, borderRadius: 6, flex: 1 }}>
+                    <div style={{ fontSize: 11, color: "#64748b" }}>ROUNDS TAKEN</div>
+                    <div style={{ fontSize: 20, fontWeight: 800, color: "#60a5fa" }}>{delibResult.rounds_taken}</div>
+                  </div>
+                  <div style={{ background: "#090e16", border: "1px solid #1f2b3b", padding: 10, borderRadius: 6, flex: 1 }}>
+                    <div style={{ fontSize: 11, color: "#64748b" }}>CRITIC RISK SCORE</div>
+                    <div style={{ fontSize: 20, fontWeight: 800, color: delibResult.critic_risk_score > 0 ? "#f87171" : "#34d399" }}>
+                      {delibResult.critic_risk_score.toFixed(1)}
+                    </div>
+                  </div>
+                  <div style={{ background: "#090e16", border: "1px solid #1f2b3b", padding: 10, borderRadius: 6, flex: 1 }}>
+                    <div style={{ fontSize: 11, color: "#64748b" }}>SECURITY STATUS</div>
+                    <div style={{ fontSize: 14, fontWeight: 700, color: delibResult.critic_approved ? "#34d399" : "#f87171", marginTop: 4 }}>
+                      {delibResult.critic_approved ? "APPROVED" : "BLOCKED"}
+                    </div>
                   </div>
                 </div>
-              )}
 
-              {/* Language breakdown */}
-              {result.repository.languages && (
-                <div style={{ display: "flex", gap: 10, margin: "14px 0", flexWrap: "wrap" }}>
-                  {Object.entries(result.repository.languages).map(([lang, count]) => (
-                    <div
-                      key={lang}
-                      style={{
-                        background: "#090e16",
-                        border: "1px solid #1f2b3b",
-                        borderRadius: 8,
-                        padding: "8px 12px",
-                        fontSize: 12,
-                      }}
-                    >
-                      <span style={{ color: "#60a5fa", textTransform: "capitalize", fontWeight: 700 }}>
-                        {lang}
-                      </span>
-                      : {count}
+                <h4 style={{ fontSize: 12, textTransform: "uppercase", color: "#94a3b8", margin: "16px 0 8px" }}>
+                  Architect Plan Steps ({delibResult.steps.length})
+                </h4>
+                <div style={{ display: "grid", gap: 8 }}>
+                  {delibResult.steps.map((step) => (
+                    <div key={step.id} style={{ background: "#0c121d", border: "1px solid #1c2636", padding: "8px 12px", borderRadius: 6 }}>
+                      <div style={{ fontWeight: 700, color: "#e2e8f0", fontSize: 12 }}>[{step.id}] {step.description}</div>
+                      {step.expected_files.length > 0 && (
+                        <div style={{ color: "#64748b", fontSize: 11, marginTop: 4 }}>
+                          Target files: {step.expected_files.join(", ")}
+                        </div>
+                      )}
                     </div>
                   ))}
                 </div>
-              )}
 
-              {/* Dependency Manifests */}
-              {result.repository.manifests && Object.keys(result.repository.manifests).length > 0 && (
-                <div style={{ margin: "20px 0" }}>
-                  <div style={{ fontSize: 12, fontWeight: 700, color: "#94a3b8", marginBottom: 8 }}>
-                    DISCOVERED DEPENDENCY MANIFESTS
-                  </div>
-                  <div style={{ display: "grid", gap: 10 }}>
-                    {Object.entries(result.repository.manifests).map(([manifestFile, info]) => (
-                      <div
-                        key={manifestFile}
-                        style={{
-                          background: "#090e16",
-                          border: "1px solid #1a2433",
-                          borderRadius: 8,
-                          padding: 12,
-                        }}
-                      >
-                        <div style={{ fontWeight: 700, color: "#e2e8f0", fontSize: 13, marginBottom: 6 }}>
-                          <code>{manifestFile}</code>
+                {delibResult.critic_findings.length > 0 && (
+                  <div style={{ marginTop: 16 }}>
+                    <h4 style={{ fontSize: 12, textTransform: "uppercase", color: "#f87171", margin: "16px 0 8px" }}>
+                      Security Critic Findings ({delibResult.critic_findings.length})
+                    </h4>
+                    <div style={{ display: "grid", gap: 6 }}>
+                      {delibResult.critic_findings.map((f, i) => (
+                        <div key={i} style={{ background: "rgba(239,68,68,0.1)", border: "1px solid #dc2626", padding: "8px 12px", borderRadius: 6 }}>
+                          <span style={{ fontWeight: 700, color: "#f87171", fontSize: 11 }}>[{f.severity.toUpperCase()}] {f.rule_id}: </span>
+                          <span style={{ color: "#e2e8f0", fontSize: 12 }}>{f.description}</span>
                         </div>
-                        {info.dependencies && info.dependencies.length > 0 && (
-                          <div style={{ fontSize: 11, color: "#94a3b8" }}>
-                            Dependencies ({info.dependencies.length}):{" "}
-                            <span style={{ color: "#cbd5e1" }}>
-                              {info.dependencies.slice(0, 10).join(", ")}
-                              {info.dependencies.length > 10 ? "..." : ""}
-                            </span>
-                          </div>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              {/* Test-to-Source Mappings */}
-              {result.repository.test_mappings && Object.keys(result.repository.test_mappings).length > 0 && (
-                <div style={{ margin: "20px 0" }}>
-                  <div style={{ fontSize: 12, fontWeight: 700, color: "#94a3b8", marginBottom: 8 }}>
-                    TEST-TO-SOURCE RELATIONSHIPS
-                  </div>
-                  <table className="tool-table" style={{ margin: 0 }}>
-                    <thead>
-                      <tr>
-                        <th>Source File</th>
-                        <th>Associated Test Files</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {Object.entries(result.repository.test_mappings).map(([src, tests]) => (
-                        <tr key={src}>
-                          <td><code>{src}</code></td>
-                          <td>
-                            {tests.map((t) => (
-                              <code key={t} style={{ marginRight: 6, color: "#34d399" }}>{t}</code>
-                            ))}
-                          </td>
-                        </tr>
                       ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        </section>
+      )}
 
-              {/* File list */}
-              {result.repository.files && (
-                <div style={{ maxHeight: 350, overflowY: "auto", border: "1px solid #1a2433", borderRadius: 8, marginTop: 16 }}>
-                  <table className="tool-table" style={{ margin: 0 }}>
-                    <thead>
-                      <tr>
-                        <th>Path</th>
-                        <th>Language</th>
-                        <th>Size (Bytes)</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {result.repository.files.map((f) => (
-                        <tr key={f.path}>
-                          <td><code>{f.path}</code></td>
-                          <td>{f.language}</td>
-                          <td>{f.size}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
+      {/* TAB 4: MODEL DISTILLATION */}
+      {activeTab === "distillation" && (
+        <section className="panel">
+          <div className="panel-title">
+            <span>Model Distillation Dataset Pipeline</span>
+            <div style={{ display: "flex", gap: 10 }}>
+              <button type="button" onClick={loadDistillationRecords} disabled={distillBusy}>
+                {distillBusy ? "Harvesting..." : "Refresh Records"}
+              </button>
+              <button
+                type="button"
+                onClick={downloadDistillationJsonl}
+                disabled={distillRecords.length === 0}
+                style={{ background: "#0284c7" }}
+              >
+                Download JSONL ({distillRecords.length})
+              </button>
+            </div>
+          </div>
+          <p className="hint">
+            Harvests verified agent trajectories with 100% passing verification checks from durable SQLite checkpoints and formats them into standard ChatML JSONL pairs for fine-tuning smaller 7B/14B coding models.
+          </p>
+
+          {distillRecords.length === 0 ? (
+            <div className="empty" style={{ marginTop: 20 }}>
+              No verified completed executions found in the Operation Journal yet. Execute successful tasks with verification gates passing to generate distillation records.
             </div>
           ) : (
-            <div className="empty">
-              No repository inspected in the current run. Specify a repository path in the Execution Control tab to
-              extract repository intelligence.
+            <div style={{ marginTop: 20 }}>
+              <div style={{ display: "grid", gap: 12 }}>
+                {distillRecords.slice(0, 10).map((rec, i) => (
+                  <div key={i} style={{ background: "#090e16", border: "1px solid #1a2433", borderRadius: 8, padding: 14 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                      <span style={{ fontWeight: 700, color: "#60a5fa", fontSize: 13 }}>
+                        Run: {rec.metadata.run_id} — {rec.metadata.task_title}
+                      </span>
+                      <span style={{ fontSize: 11, color: "#34d399", background: "rgba(52,211,153,0.1)", padding: "2px 8px", borderRadius: 4 }}>
+                        {rec.metadata.verification_checks_passed} Checks Passed · {rec.metadata.operations_count} Operations
+                      </span>
+                    </div>
+
+                    <div style={{ display: "flex", flexDirection: "column", gap: 6, fontSize: 12 }}>
+                      {rec.messages.map((m, mIdx) => (
+                        <div key={mIdx} style={{ background: "#020408", padding: 8, borderRadius: 4 }}>
+                          <span style={{ fontWeight: 700, color: m.role === "system" ? "#94a3b8" : m.role === "user" ? "#38bdf8" : "#4ade80", textTransform: "uppercase", fontSize: 10 }}>
+                            {m.role}:
+                          </span>
+                          <pre style={{ margin: "4px 0 0", color: "#cbd5e1", whiteSpace: "pre-wrap", fontFamily: "monospace", fontSize: 11, maxHeight: 100, overflowY: "auto" }}>
+                            {m.content}
+                          </pre>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
             </div>
           )}
         </section>
       )}
 
-      {/* TAB 3: DIFF & RISK ANALYSIS */}
+      {/* TAB 5: DIFF & RISK ANALYSIS */}
       {activeTab === "diff" && (
         <section className="grid">
           <div className="panel">
@@ -848,29 +1131,28 @@ export default function Home() {
             <label htmlFor="diff-content">Git Diff Content</label>
             <textarea
               id="diff-content"
-              style={{ minHeight: 280, fontFamily: "monospace", fontSize: 12 }}
               value={diffInput}
               onChange={(e) => setDiffInput(e.target.value)}
+              rows={12}
             />
-            <button onClick={analyzeDiff} disabled={diffBusy}>
-              {diffBusy ? "Analyzing..." : "Analyze Diff & Score Risk"}
+            <button type="button" onClick={analyzeDiff} disabled={diffBusy}>
+              {diffBusy ? "Analyzing Diff..." : "Analyze Diff & Risk"}
             </button>
-            <p className="hint">
-              Detects file sensitivity (auth, infra, migrations), line additions/deletions, and structural risk score.
-            </p>
           </div>
 
           <div className="panel">
-            <div className="panel-title">
-              <span>Risk Assessment</span>
-              {diffAnalysis && <span className={`risk-tag ${diffAnalysis.risk}`}>{diffAnalysis.risk} RISK</span>}
-            </div>
-
+            <div className="panel-title">Risk Analysis & Blast Radius</div>
             {!diffAnalysis ? (
-              <div className="empty">Paste a unified diff and click Analyze to review risk classifications.</div>
+              <div className="empty">Paste a unified git diff on the left and click Analyze Diff.</div>
             ) : (
               <div>
-                <div style={{ display: "flex", gap: 16, margin: "12px 0 20px" }}>
+                <div style={{ display: "flex", gap: 12, marginBottom: 16 }}>
+                  <div style={{ background: "#090e16", border: "1px solid #1f2b3b", padding: 12, borderRadius: 8 }}>
+                    <div style={{ fontSize: 11, color: "#64748b" }}>AGGREGATE RISK</div>
+                    <div style={{ fontSize: 20, fontWeight: 800, color: diffAnalysis.risk === "high" ? "#f87171" : "#34d399", textTransform: "uppercase" }}>
+                      {diffAnalysis.risk}
+                    </div>
+                  </div>
                   <div style={{ background: "#090e16", border: "1px solid #1f2b3b", padding: 12, borderRadius: 8 }}>
                     <div style={{ fontSize: 11, color: "#64748b" }}>TOTAL ADDITIONS</div>
                     <div style={{ fontSize: 24, fontWeight: 800, color: "#34d399" }}>
@@ -914,7 +1196,7 @@ export default function Home() {
         </section>
       )}
 
-      {/* TAB 4: EVALUATION BENCHMARK SUITE */}
+      {/* TAB 6: EVALUATION BENCHMARK SUITE */}
       {activeTab === "evaluation" && (
         <section className="panel">
           <div className="panel-title">

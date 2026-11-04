@@ -16,6 +16,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from .change_analysis import analyze_diff
+from .codegraph import CodeGraph
 from .critic import review_diff, review_workspace
 from .deliberation import DeliberationCouncil
 from .distillation import DatasetExporter
@@ -228,6 +229,22 @@ async def websocket_run_endpoint(websocket: WebSocket, run_id: str) -> None:
                     {"event_type": "action_result", "action": "reject", "status": "rejected"}
                 )
                 break
+            elif action == "steer":
+                guidance = str(data.get("guidance", "")).strip()
+                if guidance:
+                    bus.publish(
+                        run_id=run_id,
+                        event_type="operator:guidance",
+                        payload={"guidance": guidance, "timestamp": time.time()},
+                    )
+                    await websocket.send_json(
+                        {
+                            "event_type": "action_result",
+                            "action": "steer",
+                            "status": "guidance_recorded",
+                            "guidance": guidance,
+                        }
+                    )
     except WebSocketDisconnect:
         pass
     finally:
@@ -365,3 +382,25 @@ def export_dataset(limit: int = 1000) -> dict[str, Any]:
     exporter = DatasetExporter(_store)
     records = exporter.extract_training_records(limit=limit)
     return {"total_records": len(records), "records": records}
+
+
+class BlastRadiusRequest(BaseModel):
+    repository: str
+    target_file: str
+
+
+@app.post("/api/v1/repository/blast-radius")
+def calculate_blast_radius(request: BlastRadiusRequest) -> dict[str, Any]:
+    repo_path = Path(request.repository).resolve()
+    if not repo_path.is_dir():
+        raise HTTPException(status_code=400, detail="Repository path does not exist.")
+    graph = CodeGraph(repo_path)
+    radius = graph.get_blast_radius(request.target_file)
+    return {
+        "target_file": radius.target_file,
+        "direct_dependents": radius.direct_dependents,
+        "transitive_dependents": radius.transitive_dependents,
+        "affected_tests": radius.affected_tests,
+        "impact_level": radius.impact_level,
+        "total_impacted_files": radius.total_impacted_files,
+    }
