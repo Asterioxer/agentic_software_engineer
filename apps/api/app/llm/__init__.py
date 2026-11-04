@@ -9,8 +9,10 @@ from .providers import (
     OpenAICompatibleClient,
 )
 from .repair import CodeRepairResult, repair_code
+from .router import AdaptiveModelRouter, RouterMetrics, TaskComplexity
 
 __all__ = [
+    "AdaptiveModelRouter",
     "Advisory",
     "AnthropicClient",
     "CodeRepairResult",
@@ -20,6 +22,8 @@ __all__ = [
     "ModelUsage",
     "OllamaProvider",
     "OpenAICompatibleClient",
+    "RouterMetrics",
+    "TaskComplexity",
     "TokenBudget",
     "build_advisor",
     "get_model_client",
