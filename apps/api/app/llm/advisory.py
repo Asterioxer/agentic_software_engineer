@@ -5,7 +5,7 @@ import os
 import urllib.request
 from dataclasses import dataclass
 
-from .providers import DeterministicProvider, PlanningProvider, PlanRequest
+from ..providers import DeterministicProvider, PlanningProvider, PlanRequest
 
 
 @dataclass(frozen=True)

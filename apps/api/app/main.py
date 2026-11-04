@@ -3,12 +3,13 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from collections.abc import AsyncGenerator
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
@@ -161,6 +162,70 @@ async def stream_run_events(run_id: str) -> StreamingResponse:
             "X-Accel-Buffering": "no",
         },
     )
+
+
+@app.websocket("/api/v1/ws/runs/{run_id}")
+async def websocket_run_endpoint(websocket: WebSocket, run_id: str) -> None:
+    checkpoint = _store.get_checkpoint(run_id)
+    if not checkpoint:
+        await websocket.close(code=4004, reason=f"Run '{run_id}' not found.")
+        return
+
+    await websocket.accept()
+    bus = get_event_bus()
+
+    # 1. Replay historical events
+    for ev in bus.get_history(run_id):
+        await websocket.send_text(ev.to_json())
+
+    # 2. Live subscription queue
+    queue: asyncio.Queue[RunEvent | None] = asyncio.Queue(maxsize=200)
+    bus.register_queue(run_id, queue)
+
+    async def sender() -> None:
+        try:
+            while True:
+                ev = await queue.get()
+                if ev is None:
+                    await websocket.send_json({"event_type": "stream_closed", "run_id": run_id})
+                    break
+                await websocket.send_text(ev.to_json())
+        except (WebSocketDisconnect, asyncio.CancelledError):
+            pass
+
+    sender_task = asyncio.create_task(sender())
+
+    try:
+        while True:
+            data = await websocket.receive_json()
+            action = data.get("action")
+            if action == "ping":
+                await websocket.send_json({"event_type": "pong", "timestamp": time.time()})
+            elif action == "approve":
+                res = resume_run(
+                    run_id=run_id,
+                    approved=True,
+                    registry=_registry,
+                    policy=_policy,
+                    store=_store,
+                )
+                await websocket.send_json(
+                    {
+                        "event_type": "action_result",
+                        "action": "approve",
+                        "status": res.get("status"),
+                    }
+                )
+            elif action == "reject":
+                await websocket.send_json(
+                    {"event_type": "action_result", "action": "reject", "status": "rejected"}
+                )
+                break
+    except WebSocketDisconnect:
+        pass
+    finally:
+        sender_task.cancel()
+        bus.unregister_queue(run_id, queue)
 
 
 @app.post("/api/v1/runs/{run_id}/resume")

@@ -129,8 +129,9 @@ export default function Home() {
   const [result, setResult] = useState<RunResult | null>(null);
   const [recentRuns, setRecentRuns] = useState<Array<{ run_id: string; title: string; status: string; updated_at: string }>>([]);
   const [isStreaming, setIsStreaming] = useState(false);
+  const [liveLogs, setLiveLogs] = useState<Array<{ time: string; type: string; message: string }>>([]);
 
-  // Real-time SSE Telemetry listener
+  // Real-time WebSocket & SSE Telemetry listener
   useEffect(() => {
     if (!result?.run_id) return;
     const terminalStatuses = ["completed", "failed", "awaiting_approval", "reconciliation_required"];
@@ -140,34 +141,77 @@ export default function Home() {
     }
 
     setIsStreaming(true);
-    const eventSource = new EventSource(`${API}/api/v1/runs/${result.run_id}/stream`);
+    let ws: WebSocket | null = null;
+    let eventSource: EventSource | null = null;
 
-    eventSource.onmessage = (e) => {
-      try {
-        const parsed = JSON.parse(e.data);
-        if (parsed.event_type?.startsWith("status:")) {
-          const newStatus = parsed.payload?.status;
-          if (newStatus) {
-            setResult((prev) => (prev ? { ...prev, status: newStatus } : null));
-            if (terminalStatuses.includes(newStatus)) {
-              setIsStreaming(false);
-              eventSource.close();
-            }
+    function handleEvent(parsed: { event_type?: string; payload?: unknown }) {
+      const now = new Date().toLocaleTimeString();
+      const payloadStr = typeof parsed.payload === "string" ? parsed.payload : JSON.stringify(parsed.payload || {});
+      setLiveLogs((prev) => [
+        ...prev.slice(-99),
+        {
+          time: now,
+          type: parsed.event_type || "event",
+          message: payloadStr,
+        },
+      ]);
+
+      if (parsed.event_type?.startsWith("status:")) {
+        const payloadObj = parsed.payload as { status?: string } | undefined;
+        const newStatus = payloadObj?.status;
+        if (newStatus) {
+          setResult((prev) => (prev ? { ...prev, status: newStatus } : null));
+          if (terminalStatuses.includes(newStatus)) {
+            setIsStreaming(false);
           }
         }
-      } catch {
-        // Heartbeat comment or non-json message
       }
-    };
+    }
 
-    eventSource.onerror = () => {
-      setIsStreaming(false);
-      eventSource.close();
-    };
+    function startSSE() {
+      if (!result?.run_id) return;
+      eventSource = new EventSource(`${API}/api/v1/runs/${result.run_id}/stream`);
+      eventSource.onmessage = (e) => {
+        try {
+          handleEvent(JSON.parse(e.data));
+        } catch {
+          // ignore
+        }
+      };
+      eventSource.onerror = () => {
+        setIsStreaming(false);
+        eventSource?.close();
+      };
+    }
+
+    try {
+      const wsUrl = `${API.replace(/^http/, "ws")}/api/v1/ws/runs/${result.run_id}`;
+      ws = new WebSocket(wsUrl);
+      ws.onmessage = (e) => {
+        try {
+          const parsed = JSON.parse(e.data);
+          handleEvent(parsed);
+          if (parsed.event_type === "action_result") {
+            loadRuns();
+            fetch(`${API}/api/v1/runs/${result.run_id}`).then((r) => r.json()).then(setResult);
+          }
+        } catch {
+          // ignore
+        }
+      };
+      ws.onerror = () => {
+        if (ws) ws.close();
+        ws = null;
+        startSSE();
+      };
+    } catch {
+      startSSE();
+    }
 
     return () => {
       setIsStreaming(false);
-      eventSource.close();
+      if (ws) ws.close();
+      if (eventSource) eventSource.close();
     };
   }, [result?.run_id, result?.status]);
 
@@ -463,6 +507,40 @@ export default function Home() {
                     </p>
                   </div>
                 )}
+
+                {/* Live Real-time Streaming Terminal */}
+                <div style={{ margin: "16px 0", background: "#05080e", border: "1px solid #1e293b", borderRadius: 8, padding: 12 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                    <span style={{ fontSize: 12, fontWeight: 600, color: "#94a3b8", display: "flex", alignItems: "center", gap: 6 }}>
+                      <span style={{ width: 8, height: 8, borderRadius: "50%", background: isStreaming ? "#10b981" : "#64748b" }} />
+                      REAL-TIME DUPLEX TELEMETRY & CONSOLE {isStreaming && "(LIVE STREAMING)"}
+                    </span>
+                    <div style={{ display: "flex", gap: 8 }}>
+                      <button
+                        type="button"
+                        onClick={() => setLiveLogs([])}
+                        style={{ fontSize: 11, padding: "2px 8px", background: "#1e293b", color: "#94a3b8", border: "none", borderRadius: 4, cursor: "pointer" }}
+                      >
+                        Clear Console
+                      </button>
+                    </div>
+                  </div>
+                  <div style={{ maxHeight: 180, overflowY: "auto", fontFamily: "monospace", fontSize: 11, color: "#a5f3fc", lineHeight: 1.6, padding: "6px 8px", background: "#020408", borderRadius: 4 }}>
+                    {liveLogs.length === 0 ? (
+                      <span style={{ color: "#475569" }}>Listening for real-time WebSocket events and streaming tokens...</span>
+                    ) : (
+                      liveLogs.map((log, idx) => (
+                        <div key={idx} style={{ display: "flex", gap: 8 }}>
+                          <span style={{ color: "#64748b", flexShrink: 0 }}>[{log.time}]</span>
+                          <span style={{ color: log.type.includes("fail") ? "#f87171" : log.type.includes("pass") ? "#4ade80" : "#38bdf8", flexShrink: 0 }}>
+                            {log.type}:
+                          </span>
+                          <span style={{ color: "#e2e8f0", wordBreak: "break-all" }}>{log.message}</span>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
 
                 {/* Planned Steps */}
                 {result.plan && result.plan.length > 0 && (

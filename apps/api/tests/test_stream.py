@@ -92,3 +92,51 @@ def test_stream_endpoint_replays_history_for_completed_run(tmp_path: Path) -> No
         body = "".join(chunk for chunk in stream_resp.iter_text())
         assert "status:" in body
         assert run_id in body
+
+
+def test_websocket_missing_run() -> None:
+    client = TestClient(app)
+    with pytest.raises(Exception), client.websocket_connect("/api/v1/ws/runs/non-existent-ws-run"):  # noqa: B017
+        pass
+
+
+def test_websocket_connect_ping_and_approval(tmp_path: Path) -> None:
+    client = TestClient(app)
+
+    # Create a run awaiting approval
+    task = TaskSpec(
+        title="WebSocket interactive test",
+        description="Verify interactive websocket approval",
+        repository=str(tmp_path),
+        dry_run=False,
+        auto_approve=False,
+    )
+    store = get_default_store()
+    run = AgentRun(task, build_default_registry(), ToolPolicy(), store=store)
+    res = run.execute()
+    run_id = str(res["run_id"])
+    assert res["status"] == "awaiting_approval"
+
+    with client.websocket_connect(f"/api/v1/ws/runs/{run_id}") as websocket:
+        # Test ping action
+        websocket.send_json({"action": "ping"})
+        pong_resp = None
+        for _ in range(10):
+            msg = websocket.receive_json()
+            if msg.get("event_type") == "pong":
+                pong_resp = msg
+                break
+        assert pong_resp is not None
+        assert pong_resp.get("event_type") == "pong"
+
+        # Test interactive approval over WebSocket
+        websocket.send_json({"action": "approve"})
+        action_resp = None
+        for _ in range(15):
+            msg = websocket.receive_json()
+            if msg.get("event_type") == "action_result":
+                action_resp = msg
+                break
+        assert action_resp is not None
+        assert action_resp.get("action") == "approve"
+        assert action_resp.get("status") == "completed"
