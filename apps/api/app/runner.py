@@ -23,6 +23,7 @@ from .domain import (
     VerificationResult,
 )
 from .execution import WorkspaceAction, WorkspaceExecutor, compute_file_hash
+from .llm import repair_code
 from .planner import plan_with_repository
 from .policy import ToolPolicy
 from .reflection import classify_failure, reflect
@@ -142,6 +143,57 @@ class AgentRun:
                     )
                     return False
         return True
+
+    def _attempt_self_healing_repair(self, failing_results: list[VerificationResult]) -> bool:
+        """Attempt to autonomously repair code when a verification check fails."""
+        if self.retry_count >= self.max_retries:
+            return False
+
+        repo_root = Path(self.task.repository or ".").resolve()
+        repaired = False
+
+        for r in failing_results:
+            if not r.passed:
+                target_file: Path | None = None
+                if ":" in r.check:
+                    cand = r.check.split(":", 1)[1]
+                    cand_path = (repo_root / cand).resolve()
+                    if cand_path.exists() and cand_path.is_file():
+                        target_file = cand_path
+
+                if not target_file:
+                    for s in reversed(self.checkpoint.plan):
+                        if s.tool in ("workspace.plan", "workspace.patch") and s.inputs:
+                            p = s.inputs.get("path")
+                            if isinstance(p, str):
+                                cand_path = (repo_root / p).resolve()
+                                if cand_path.exists() and cand_path.is_file():
+                                    target_file = cand_path
+                                    break
+
+                if target_file and target_file.exists() and target_file.is_file():
+                    try:
+                        broken_code = target_file.read_text(encoding="utf-8")
+                        repair_res = repair_code(
+                            broken_code=broken_code,
+                            error_message=f"{r.check}: {r.detail}",
+                            test_output=r.detail,
+                        )
+                        if repair_res.success and repair_res.syntax_valid:
+                            self.retry_count += 1
+                            self.checkpoint.retry_count = self.retry_count
+                            self._emit(
+                                RunStatus.REFLECTING,
+                                f"Autonomous self-healing attempt {self.retry_count}/{self.max_retries}: repaired {target_file.name}",
+                            )
+                            if not self.task.dry_run:
+                                target_file.write_text(repair_res.repaired_code, encoding="utf-8")
+                            repaired = True
+                            break
+                    except (OSError, UnicodeDecodeError):
+                        continue
+
+        return repaired
 
     def execute(self, auto_approved: bool = False) -> dict[str, object]:
         if not self.events:
@@ -376,6 +428,10 @@ class AgentRun:
         self.checkpoint.verification = results
 
         if not all(result.passed for result in results):
+            if self._attempt_self_healing_repair(results):
+                # Re-verify after autonomous self-healing patch
+                return self.execute(auto_approved=auto_approved)
+
             diagnosis = classify_failure("Verification failed", verification_results=results)
             self.checkpoint.failure_diagnosis = diagnosis
             reflection = reflect(results, retry_budget=self.max_retries - self.retry_count)

@@ -6,6 +6,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from .critic import review_diff, review_workspace
+from .distillation.exporter import DatasetExporter
 from .domain import RunStatus, TaskSpec
 from .evaluation import IndependentEvaluator
 from .policy import ToolPolicy
@@ -217,6 +218,16 @@ def cmd_inspect(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_export_dataset(args: argparse.Namespace) -> int:
+    store = RunStore(args.db) if args.db else get_default_store()
+    exporter = DatasetExporter(store=store)
+    out_path = Path(args.out)
+    count = exporter.export_to_jsonl(out_path, limit=args.limit)
+    print("\n[Model Distillation Dataset Exporter]")
+    print(f"Exported {count} verified trajectory sample(s) to '{out_path.resolve()}'")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="agentic-engineer",
@@ -279,6 +290,22 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_inspect.add_argument("repo", help="Path to repository")
     p_inspect.set_defaults(func=cmd_inspect)
+
+    # export-dataset
+    p_export = subparsers.add_parser(
+        "export-dataset", help="Export verified agent trajectories into JSONL fine-tuning format"
+    )
+    p_export.add_argument(
+        "--out", help="Output path for JSONL dataset", default="distillation_dataset.jsonl"
+    )
+    p_export.add_argument(
+        "--limit",
+        type=int,
+        help="Maximum number of historical runs to evaluate for export (default: 1000)",
+        default=1000,
+    )
+    p_export.add_argument("--db", help="Path to SQLite database", default=None)
+    p_export.set_defaults(func=cmd_export_dataset)
 
     return parser
 

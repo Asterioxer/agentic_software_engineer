@@ -45,3 +45,37 @@ def test_reflection_bounds_retry_budget() -> None:
     ref_pass = reflect(all_passed, retry_budget=2)
     assert ref_pass.passed
     assert ref_pass.retry_budget == 0
+
+
+from pathlib import Path
+
+from app.domain import TaskSpec
+from app.policy import ToolPolicy
+from app.runner import AgentRun
+from app.store import RunStore
+from app.tools import build_default_registry
+
+
+def test_autonomous_self_healing_repair(tmp_path: Path) -> None:
+    test_file = tmp_path / "broken.py"
+    test_file.write_text("def broken():\n    retur False\n", encoding="utf-8")
+
+    task = TaskSpec(
+        title="Self-healing test",
+        description="Fix broken file",
+        repository=str(tmp_path),
+        dry_run=False,
+        auto_approve=True,
+        max_retries=2,
+    )
+    store = RunStore(str(tmp_path / "sh.db"))
+    run = AgentRun(task, build_default_registry(), ToolPolicy(), store=store)
+
+    failing_results = [
+        VerificationResult(check="syntax:broken.py", passed=False, detail="invalid syntax")
+    ]
+    repaired = run._attempt_self_healing_repair(failing_results)
+    assert repaired
+    assert run.retry_count == 1
+    fixed_content = test_file.read_text(encoding="utf-8")
+    assert "def " in fixed_content

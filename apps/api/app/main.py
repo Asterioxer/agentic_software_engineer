@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import time
 from collections.abc import AsyncGenerator
 from dataclasses import asdict
@@ -17,8 +18,14 @@ from pydantic import BaseModel, Field
 from .change_analysis import analyze_diff
 from .critic import review_diff, review_workspace
 from .deliberation import DeliberationCouncil
+from .distillation import DatasetExporter
 from .domain import RunStatus, TaskSpec
 from .evaluation import IndependentEvaluator
+from .integrations import (
+    format_github_pr_comment,
+    parse_github_event,
+    verify_github_signature,
+)
 from .llm import build_advisor
 from .policy import ToolPolicy
 from .providers import DeterministicProvider, PlanRequest
@@ -319,3 +326,42 @@ def get_latest_swe_bench() -> dict[str, Any]:
         raise HTTPException(status_code=404, detail="No SWE-bench evaluation report generated yet.")
     data: dict[str, Any] = json.loads(report_file.read_text(encoding="utf-8"))
     return data
+
+
+@app.post("/api/v1/integrations/github/webhook")
+async def github_webhook(request: Request) -> dict[str, Any]:
+    secret = os.getenv("GITHUB_WEBHOOK_SECRET", "")
+    sig_header = request.headers.get("X-Hub-Signature-256")
+    body_bytes = await request.body()
+
+    if secret and not verify_github_signature(body_bytes, sig_header, secret):
+        raise HTTPException(status_code=401, detail="Invalid GitHub webhook signature.")
+
+    event_type = request.headers.get("X-GitHub-Event", "issues")
+    try:
+        payload = json.loads(body_bytes.decode("utf-8"))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid JSON payload.") from exc
+
+    task = parse_github_event(event_type, payload)
+    if not task:
+        return {"status": "ignored", "event": event_type, "reason": "No actionable trigger"}
+
+    run = AgentRun(task, _registry, _policy, store=_store)
+    result = run.execute()
+    comment = format_github_pr_comment(result)
+
+    return {
+        "status": "processed",
+        "event": event_type,
+        "run_id": run.run_id,
+        "run_status": result.get("status"),
+        "github_comment": comment,
+    }
+
+
+@app.post("/api/v1/distillation/export")
+def export_dataset(limit: int = 1000) -> dict[str, Any]:
+    exporter = DatasetExporter(_store)
+    records = exporter.extract_training_records(limit=limit)
+    return {"total_records": len(records), "records": records}

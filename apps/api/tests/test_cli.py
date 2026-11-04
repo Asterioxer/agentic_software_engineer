@@ -126,3 +126,16 @@ def test_cli_main_entrypoint(tmp_path: Path) -> None:
 
     code = main(["review", str(clean_file)])
     assert code == 0
+
+
+def test_cli_export_dataset(tmp_path: Path) -> None:
+    db_path = str(tmp_path / "export_test.db")
+    store = RunStore(db_path)
+    task = TaskSpec(title="Verified run", description="Testing export", repository=str(tmp_path))
+    run = AgentRun(task, build_default_registry(), ToolPolicy(), store=store)
+    run.execute()
+
+    out_file = tmp_path / "exported.jsonl"
+    code = main(["export-dataset", "--out", str(out_file), "--db", db_path])
+    assert code == 0
+    assert out_file.exists()
