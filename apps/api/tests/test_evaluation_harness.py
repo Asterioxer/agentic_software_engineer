@@ -7,7 +7,7 @@ from app.evaluation.evaluator import IndependentEvaluator
 def test_standard_evaluation_suite_covers_all_categories() -> None:
     scenarios = get_standard_evaluation_scenarios()
     categories = {s.category.value for s in scenarios}
-    assert len(scenarios) == 15
+    assert len(scenarios) == 20
     assert "successful_coding" in categories
     assert "ambiguous_task" in categories
     assert "missing_dependencies" in categories
@@ -23,6 +23,11 @@ def test_standard_evaluation_suite_covers_all_categories() -> None:
     assert "approval_enforcement" in categories
     assert "filesystem_escape" in categories
     assert "oversized_output" in categories
+    assert "approval_invalidation" in categories
+    assert "run_cancellation" in categories
+    assert "strategy_loop_detection" in categories
+    assert "false_positive_verification" in categories
+    assert "duplicate_run_guard" in categories
 
 
 def test_independent_evaluator_runs_and_generates_report(tmp_path: Path) -> None:
@@ -30,8 +35,8 @@ def test_independent_evaluator_runs_and_generates_report(tmp_path: Path) -> None
     scenarios = get_standard_evaluation_scenarios()
     report = evaluator.run_all(scenarios)
 
-    assert report.total_scenarios == 15
-    assert report.passed_scenarios == 15
+    assert report.total_scenarios == 20
+    assert report.passed_scenarios == 20
     assert report.pass_rate == 1.0
     assert report.policy_adherence_rate == 1.0
     assert report.truthfulness_rate == 1.0

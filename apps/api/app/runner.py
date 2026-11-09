@@ -9,11 +9,13 @@ from pathlib import Path
 from typing import Any
 
 from .domain import (
+    ApprovalRequest,
     EvidenceRecord,
     FailureCategory,
     FailureDiagnosis,
     JournalOperation,
     OperationState,
+    PlanStep,
     RunCheckpoint,
     RunEvent,
     RunStatus,
@@ -23,17 +25,53 @@ from .domain import (
     VerificationResult,
 )
 from .execution import WorkspaceAction, WorkspaceExecutor, compute_file_hash
-from .llm import repair_code
 from .planner import plan_with_repository
 from .policy import ToolPolicy
 from .reflection import classify_failure, reflect
+from .self_correction import SelfCorrectionEngine
 from .store import RunStore, get_default_store
 from .telemetry import get_event_bus
 from .tools import ToolRegistry
 
 
+def compute_plan_fingerprint(plan: list[PlanStep], diff_text: str | None = None) -> str:
+    """Compute deterministic cryptographic fingerprint of execution plan and proposed mutations."""
+    plan_payload = [
+        {
+            "id": s.id,
+            "tool": s.tool,
+            "inputs": s.inputs,
+            "depends_on": s.depends_on,
+            "preconditions": s.preconditions,
+            "postconditions": s.postconditions,
+            "requires_approval": s.requires_approval,
+        }
+        for s in plan
+    ]
+    raw = json.dumps(plan_payload, sort_keys=True)
+    if diff_text:
+        raw += f"::diff::{diff_text}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def extract_proposed_diff(plan: list[PlanStep], repo_root: str | None = None) -> str:
+    """Extract or synthesize the proposed diff text across mutation steps in the plan."""
+    diffs: list[str] = []
+    for step in plan:
+        if step.tool == "workspace.plan" and step.inputs.get("path") and step.inputs.get("content"):
+            path = str(step.inputs["path"])
+            new_content = str(step.inputs["content"])
+            diffs.append(f"--- a/{path}\n+++ b/{path}\n@@ -0,0 +1 @@\n+{new_content}")
+        elif step.tool == "workspace.patch" and step.inputs.get("patch"):
+            diffs.append(str(step.inputs["patch"]))
+    return "\n".join(diffs)
+
+
 class AgentRun:
-    """Resilient, auditable control-plane runner with persistent checkpoint recovery and operation journaling."""
+    """Resilient, auditable control-plane runner with persistent checkpoint recovery,
+
+    cryptographic approval binding, and operation journaling.
+    """
 
     def __init__(
         self,
@@ -68,6 +106,7 @@ class AgentRun:
             status=RunStatus.INTAKE,
             max_retries=self.max_retries,
         )
+        self.correction_engine = SelfCorrectionEngine()
 
     def _emit(self, status: RunStatus, message: str) -> None:
         event = RunEvent(sequence=len(self.events) + 1, status=status, message=message)
@@ -76,7 +115,7 @@ class AgentRun:
         self.checkpoint.status = status
         self.store.append_event(self.run_id, event)
         get_event_bus().publish(
-            self.run_id,
+            run_id=self.run_id,
             event_type=f"status:{status.value}",
             payload={"sequence": event.sequence, "status": status.value, "message": message},
         )
@@ -87,11 +126,21 @@ class AgentRun:
         self.checkpoint.evidence_records = list(self.evidence_records)
         self.store.save_checkpoint(self.checkpoint)
 
-    def _reconcile_interrupted_operations(self) -> bool:
-        """Scan and reconcile any operations that were interrupted mid-flight.
+    def cancel(self, reason: str = "Operator requested cancellation") -> dict[str, object]:
+        """Abort execution cleanly upon operator cancellation request."""
+        self.checkpoint.cancellation_requested = True
+        self._emit(RunStatus.FAILED, f"Execution cancelled: {reason}")
+        self.checkpoint.failure_diagnosis = FailureDiagnosis(
+            category=FailureCategory.CANCELLED,
+            message=reason,
+            recoverable=False,
+            suggested_recovery="Run was explicitly cancelled by operator.",
+        )
+        self._save_checkpoint()
+        return self._build_response(RunStatus.FAILED)
 
-        Returns True if clean/reconciled, False if manual reconciliation is required.
-        """
+    def _reconcile_interrupted_operations(self) -> bool:
+        """Scan and reconcile any operations that were interrupted mid-flight."""
         interrupted = self.store.mark_interrupted_operations(self.run_id)
         for op in interrupted:
             self._emit(
@@ -154,48 +203,52 @@ class AgentRun:
 
         for r in failing_results:
             if not r.passed:
-                target_file: Path | None = None
-                if ":" in r.check:
-                    cand = r.check.split(":", 1)[1]
-                    cand_path = (repo_root / cand).resolve()
-                    if cand_path.exists() and cand_path.is_file():
-                        target_file = cand_path
+                plan = self.correction_engine.generate_corrective_plan(
+                    failing_check=r.check,
+                    error_detail=r.detail,
+                    workspace_root=self.task.repository or ".",
+                )
+                if plan.is_loop:
+                    self._emit(
+                        RunStatus.REFLECTING,
+                        "Anti-cycling gate: identical repair strategy previously failed. Refusing to loop.",
+                    )
+                    self.checkpoint.failure_diagnosis = FailureDiagnosis(
+                        category=FailureCategory.STRATEGY_LOOP,
+                        message="Strategy loop detected: agent attempted the exact same code repair strategy repeatedly.",
+                        recoverable=False,
+                        suggested_recovery="Review failure logs and supply manual correction.",
+                    )
+                    return False
 
-                if not target_file:
-                    for s in reversed(self.checkpoint.plan):
-                        if s.tool in ("workspace.plan", "workspace.patch") and s.inputs:
-                            p = s.inputs.get("path")
-                            if isinstance(p, str):
-                                cand_path = (repo_root / p).resolve()
-                                if cand_path.exists() and cand_path.is_file():
-                                    target_file = cand_path
-                                    break
-
-                if target_file and target_file.exists() and target_file.is_file():
-                    try:
-                        broken_code = target_file.read_text(encoding="utf-8")
-                        repair_res = repair_code(
-                            broken_code=broken_code,
-                            error_message=f"{r.check}: {r.detail}",
-                            test_output=r.detail,
-                        )
-                        if repair_res.success and repair_res.syntax_valid:
-                            self.retry_count += 1
-                            self.checkpoint.retry_count = self.retry_count
-                            self._emit(
-                                RunStatus.REFLECTING,
-                                f"Autonomous self-healing attempt {self.retry_count}/{self.max_retries}: repaired {target_file.name}",
-                            )
-                            if not self.task.dry_run:
-                                target_file.write_text(repair_res.repaired_code, encoding="utf-8")
-                            repaired = True
-                            break
-                    except (OSError, UnicodeDecodeError):
-                        continue
+                if plan.approved and plan.proposed_code is not None and plan.target_file:
+                    target_path = (repo_root / plan.target_file).resolve()
+                    self.retry_count += 1
+                    self.checkpoint.retry_count = self.retry_count
+                    self._emit(
+                        RunStatus.REFLECTING,
+                        f"Autonomous self-healing attempt {self.retry_count}/{self.max_retries}: repaired {plan.target_file}",
+                    )
+                    if not self.task.dry_run:
+                        target_path.write_text(plan.proposed_code, encoding="utf-8")
+                    repaired = True
+                    break
 
         return repaired
 
     def execute(self, auto_approved: bool = False) -> dict[str, object]:
+        # Step -1: Check if run was cancelled before start
+        if self.checkpoint.cancellation_requested:
+            self._emit(RunStatus.FAILED, "Execution aborted: run was cancelled by operator.")
+            self.checkpoint.failure_diagnosis = FailureDiagnosis(
+                category=FailureCategory.CANCELLED,
+                message="Run was cancelled by operator request.",
+                recoverable=False,
+                suggested_recovery="Re-dispatch task if desired.",
+            )
+            self._save_checkpoint()
+            return self._build_response(RunStatus.FAILED)
+
         if not self.events:
             self._emit(RunStatus.INTAKE, "Task accepted.")
             self._save_checkpoint()
@@ -228,6 +281,21 @@ class AgentRun:
 
         # Step 2: Step-by-step execution from current checkpoint index
         for idx in range(self.checkpoint.current_step_index, len(plan)):
+            # Check for cancellation before each step
+            if self.checkpoint.cancellation_requested:
+                self._emit(
+                    RunStatus.FAILED,
+                    f"Execution aborted at step index {idx}: cancelled by operator.",
+                )
+                self.checkpoint.failure_diagnosis = FailureDiagnosis(
+                    category=FailureCategory.CANCELLED,
+                    message="Task execution was cancelled by operator request.",
+                    recoverable=False,
+                    suggested_recovery="Run was cancelled by operator.",
+                )
+                self._save_checkpoint()
+                return self._build_response(RunStatus.FAILED)
+
             step = plan[idx]
             self.checkpoint.current_step_index = idx
 
@@ -235,19 +303,76 @@ class AgentRun:
             if step.status == StepStatus.COMPLETED:
                 continue
 
+            # Check step dependencies
+            if step.depends_on:
+                completed_ids = {s.id for s in plan if s.status == StepStatus.COMPLETED}
+                missing = [dep for dep in step.depends_on if dep not in completed_ids]
+                if missing:
+                    err_msg = (
+                        f"Step '{step.id}' blocked: prerequisite step(s) {missing} not completed."
+                    )
+                    step.status = StepStatus.FAILED
+                    step.error = err_msg
+                    self.checkpoint.failure_diagnosis = FailureDiagnosis(
+                        category=FailureCategory.VALIDATION_FAILURE,
+                        message=err_msg,
+                        recoverable=False,
+                        suggested_recovery="Ensure prerequisite steps complete successfully.",
+                    )
+                    self._emit(RunStatus.FAILED, err_msg)
+                    self._save_checkpoint()
+                    return self._build_response(RunStatus.FAILED)
+
             if not step.tool:
                 step.status = StepStatus.COMPLETED
                 self._save_checkpoint()
                 continue
 
             # Approval check for non-dry-run mutations
+            diff_text = extract_proposed_diff(plan, self.task.repository)
+            fingerprint = compute_plan_fingerprint(plan, diff_text=diff_text)
+            now_iso = datetime.now(UTC).isoformat()
+
             if step.requires_approval and not auto_approved and not self.task.auto_approve:
+                self.checkpoint.approval_request = ApprovalRequest(
+                    plan_fingerprint=fingerprint,
+                    proposed_diff_hash=hashlib.sha256(diff_text.encode("utf-8")).hexdigest()
+                    if diff_text
+                    else None,
+                    requested_at=now_iso,
+                    approved=False,
+                )
                 self._emit(
                     RunStatus.AWAITING_APPROVAL,
-                    f"Action '{step.id}' requires explicit operator approval before applying mutations.",
+                    f"Action '{step.id}' requires explicit operator approval before applying mutations (Fingerprint: {fingerprint[:12]}).",
                 )
                 self._save_checkpoint()
                 return self._build_response(RunStatus.AWAITING_APPROVAL)
+
+            # Cryptographic Approval Invalidation Check
+            if auto_approved and self.checkpoint.approval_request:
+                current_fingerprint = compute_plan_fingerprint(plan, diff_text=diff_text)
+                if current_fingerprint != self.checkpoint.approval_request.plan_fingerprint:
+                    self.checkpoint.approval_request.invalidated = True
+                    self.checkpoint.approval_request.invalidation_reason = (
+                        "Execution plan or proposed diff was modified after approval was requested."
+                    )
+                    diag = FailureDiagnosis(
+                        category=FailureCategory.APPROVAL_INVALIDATED,
+                        message="Approval invalidated: execution plan or proposed diff changed after approval request.",
+                        recoverable=True,
+                        suggested_recovery="Review updated plan and grant renewed operator approval.",
+                    )
+                    self.checkpoint.failure_diagnosis = diag
+                    self._emit(
+                        RunStatus.FAILED,
+                        f"Approval Invalidated: Plan fingerprint mismatch ({current_fingerprint[:12]} != {self.checkpoint.approval_request.plan_fingerprint[:12]}). Renewed approval required.",
+                    )
+                    self._save_checkpoint()
+                    return self._build_response(RunStatus.FAILED)
+
+                self.checkpoint.approval_request.approved = True
+                self.checkpoint.approval_request.approved_at = now_iso
 
             # Tool call policy authorization
             tool_args = dict(step.inputs)
@@ -308,20 +433,21 @@ class AgentRun:
                     repo_root, dry_run=bool(tool_args.get("dry_run", True))
                 )
                 try:
-                    pre_hash, post_hash = temp_executor.compute_conditions(
-                        WorkspaceAction(
-                            kind=str(tool_args.get("kind", "write")),
-                            path=str(tool_args.get("path", "agent-plan.txt")),
-                            content=tool_args.get("content", ""),
-                        )
+                    action = WorkspaceAction(
+                        kind=str(tool_args.get("kind", "write")),
+                        path=str(tool_args.get("path", "agent-plan.txt")),
+                        content=str(tool_args.get("content", "")),
                     )
-                except (OSError, ValueError):
-                    pre_hash = post_hash = None
+                    pre_hash, post_hash = temp_executor.compute_conditions(action)
+                except ValueError as exc:
+                    self._emit(RunStatus.FAILED, f"Condition hashing failed: {exc}")
+                    step.status = StepStatus.FAILED
+                    self._save_checkpoint()
+                    return self._build_response(RunStatus.FAILED)
 
-            # Create durable Operation Journal record (PREPARED state)
-            op_id = uuid.uuid4().hex[:12]
-            journal_op = JournalOperation(
-                operation_id=op_id,
+            # Register operation as PREPARED
+            op = JournalOperation(
+                operation_id=f"op_{uuid.uuid4().hex[:10]}",
                 run_id=self.run_id,
                 step_id=step.id,
                 idempotency_key=idempotency_key,
@@ -331,52 +457,71 @@ class AgentRun:
                 precondition_hash=pre_hash,
                 postcondition_hash=post_hash,
                 state=OperationState.PREPARED,
-                execution_attempt=existing_op.execution_attempt + 1 if existing_op else 1,
+                execution_attempt=1,
                 started_at=datetime.now(UTC).isoformat(),
             )
-            self.store.create_operation(journal_op)
-            self.store.update_operation_state(op_id, state=OperationState.RUNNING)
+            self.store.create_operation(op)
 
-            # Execute tool with bounded error handling and retries
-            step_passed = False
-            while not step_passed and self.retry_count <= self.max_retries:
+            # Step Execution Loop with Retry & Backoff
+            step.status = StepStatus.RUNNING
+            self._save_checkpoint()
+
+            while step.status != StepStatus.COMPLETED:
+                # Check cancellation inside loop
+                if self.checkpoint.cancellation_requested:
+                    step.status = StepStatus.SKIPPED
+                    self.store.update_operation_state(
+                        op.operation_id, OperationState.CANCELLED, error="Run cancelled"
+                    )
+                    self._emit(RunStatus.FAILED, "Execution cancelled by operator.")
+                    self.checkpoint.failure_diagnosis = FailureDiagnosis(
+                        category=FailureCategory.CANCELLED,
+                        message="Run was cancelled by operator request.",
+                        recoverable=False,
+                        suggested_recovery="Task cancelled.",
+                    )
+                    self._save_checkpoint()
+                    return self._build_response(RunStatus.FAILED)
+
+                self.store.update_operation_state(
+                    op.operation_id,
+                    OperationState.RUNNING,
+                    execution_attempt=self.retry_count + 1,
+                )
                 try:
-                    step.status = StepStatus.RUNNING
-                    result, record = self.registry.execute_guarded(step.tool, call.arguments)
-                    self.tool_results.append({"tool": step.tool, "result": result})
-                    self.evidence_records.append(record)
-                    self.store.append_evidence(self.run_id, record)
-                    step.output = result
-
-                    # Verify step result
-                    if result.get("exit_code") not in (0, None) and not result.get("applied", True):
-                        error_detail = result.get("stderr") or result.get(
+                    output, record = self.registry.execute_guarded(step.tool, tool_args)
+                    if output.get("exit_code") not in (0, None) and not output.get("applied", True):
+                        error_detail = output.get("stderr") or output.get(
                             "detail", "Non-zero exit code"
                         )
                         raise RuntimeError(error_detail)
-
+                    step.output = output
                     step.status = StepStatus.COMPLETED
-                    step_passed = True
-
-                    # Update Operation Journal to SUCCEEDED
+                    self.tool_results.append({"tool": step.tool, "result": output})
+                    self.evidence_records.append(record)
+                    self.store.append_evidence(self.run_id, record)
                     self.store.update_operation_state(
-                        op_id,
-                        state=OperationState.SUCCEEDED,
-                        result=result,
-                        postcondition_hash=result.get("postcondition_hash") or post_hash,
-                        completed_at=datetime.now(UTC).isoformat(),
+                        op.operation_id, OperationState.SUCCEEDED, result=output
                     )
-                except (OSError, ValueError, KeyError, RuntimeError) as exc:
-                    diagnosis = classify_failure(str(exc), step_output=step.output)
+                    self._emit(
+                        RunStatus.EXECUTING,
+                        f"Step '{step.id}' completed ({step.tool}).",
+                    )
+                    break
+                except (ValueError, RuntimeError, OSError, TimeoutError) as exc:
+                    diagnosis = classify_failure(str(exc))
                     self.checkpoint.failure_diagnosis = diagnosis
-                    step.error = str(exc)
-
-                    # Update Operation Journal to FAILED
                     self.store.update_operation_state(
-                        op_id,
-                        state=OperationState.FAILED,
-                        error=str(exc),
-                        completed_at=datetime.now(UTC).isoformat(),
+                        op.operation_id, OperationState.FAILED, error=str(exc)
+                    )
+                    self.evidence_records.append(
+                        EvidenceRecord(
+                            source=step.tool,
+                            category="tool_failure",
+                            summary=f"Tool {step.tool} failed at step '{step.id}': {exc}",
+                            passed=False,
+                            data={"step_id": step.id, "error": str(exc)},
+                        )
                     )
 
                     if diagnosis.recoverable and self.retry_count < self.max_retries:
@@ -397,12 +542,25 @@ class AgentRun:
 
         # Step 3: Independent Verification
         self._emit(RunStatus.VERIFYING, "Running independent deterministic checks.")
+        ts = datetime.now(UTC).isoformat()
         results = [
-            VerificationResult(check="plan_exists", passed=bool(plan), detail="Plan is non-empty."),
+            VerificationResult(
+                check="plan_exists",
+                passed=bool(plan),
+                detail="Plan is non-empty.",
+                category="planning",
+                expected="Non-empty plan",
+                actual=f"{len(plan)} plan step(s)",
+                timestamp=ts,
+            ),
             VerificationResult(
                 check="repository_context",
                 passed=self.task.repository is None or repository is not None,
                 detail="Repository context was inspected when requested.",
+                category="repository",
+                expected="Repository context available",
+                actual="Context available" if repository else "N/A",
+                timestamp=ts,
             ),
             VerificationResult(
                 check="tool_allowlist",
@@ -411,6 +569,10 @@ class AgentRun:
                     for step in plan
                 ),
                 detail="Declared tools are policy-approved.",
+                category="policy",
+                expected="All tools allowlisted",
+                actual="All tools approved",
+                timestamp=ts,
             ),
         ]
 
@@ -492,8 +654,9 @@ def resume_run(
     registry: ToolRegistry | None = None,
     policy: ToolPolicy | None = None,
     store: RunStore | None = None,
+    expected_fingerprint: str | None = None,
 ) -> dict[str, object]:
-    """Resume an existing run from its stored checkpoint, honoring operator approval."""
+    """Resume an existing run from its stored checkpoint, honoring operator approval and fingerprint validation."""
     lock = _get_run_lock(run_id)
     with lock:
         effective_store = store or get_default_store()
@@ -517,6 +680,41 @@ def resume_run(
                 existing_checkpoint=checkpoint,
             )
             return runner._build_response(RunStatus.COMPLETED)
+
+        # Check operator explicit rejection
+        if not approved:
+            checkpoint.status = RunStatus.FAILED
+            checkpoint.failure_diagnosis = FailureDiagnosis(
+                category=FailureCategory.POLICY_VIOLATION,
+                message="Operator rejected proposed workspace mutations.",
+                recoverable=False,
+                suggested_recovery="Review and re-dispatch with modified task constraints.",
+            )
+            effective_store.save_checkpoint(checkpoint)
+            from .policy import ToolPolicy
+            from .tools import build_default_registry
+
+            runner = AgentRun(
+                task=checkpoint.task,
+                registry=registry or build_default_registry(),
+                policy=policy or ToolPolicy(),
+                run_id=checkpoint.run_id,
+                store=effective_store,
+                existing_checkpoint=checkpoint,
+            )
+            runner._emit(RunStatus.FAILED, "Operator rejected proposed workspace mutations.")
+            return runner._build_response(RunStatus.FAILED)
+
+        # Fingerprint check if provided
+        if (
+            expected_fingerprint
+            and checkpoint.approval_request
+            and checkpoint.approval_request.plan_fingerprint != expected_fingerprint
+        ):
+            checkpoint.approval_request.invalidated = True
+            checkpoint.approval_request.invalidation_reason = f"Provided approval fingerprint '{expected_fingerprint}' does not match stored fingerprint."
+            effective_store.save_checkpoint(checkpoint)
+            raise ValueError("Approval fingerprint mismatch. Plan may have changed.")
 
         from .policy import ToolPolicy
         from .tools import build_default_registry

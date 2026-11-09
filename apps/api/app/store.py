@@ -7,7 +7,16 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from .domain import EvidenceRecord, JournalOperation, OperationState, RunCheckpoint, RunEvent
+from .domain import (
+    EvidenceRecord,
+    FailureCategory,
+    FailureDiagnosis,
+    JournalOperation,
+    OperationState,
+    RunCheckpoint,
+    RunEvent,
+    RunStatus,
+)
 
 
 def _utc_now_iso() -> str:
@@ -154,6 +163,23 @@ class RunStore:
             rows = cursor.fetchall()
             return [dict(row) for row in rows]
 
+    def cancel_run(
+        self, run_id: str, reason: str = "Operator requested cancellation"
+    ) -> RunCheckpoint | None:
+        checkpoint = self.get_checkpoint(run_id)
+        if not checkpoint:
+            return None
+        checkpoint.cancellation_requested = True
+        checkpoint.status = RunStatus.FAILED
+        checkpoint.failure_diagnosis = FailureDiagnosis(
+            category=FailureCategory.CANCELLED,
+            message=reason,
+            recoverable=False,
+            suggested_recovery="Task was cancelled by operator request.",
+        )
+        self.save_checkpoint(checkpoint)
+        return checkpoint
+
     def append_event(self, run_id: str, event: RunEvent) -> None:
         timestamp = event.timestamp or _utc_now_iso()
         with self._get_connection() as conn:
@@ -238,6 +264,7 @@ class RunStore:
         postcondition_hash: str | None = None,
         recovery_status: str | None = None,
         completed_at: str | None = None,
+        execution_attempt: int | None = None,
     ) -> None:
         now = _utc_now_iso()
         with self._get_connection() as conn:
@@ -250,6 +277,7 @@ class RunStore:
                     postcondition_hash = CASE WHEN ? IS NOT NULL THEN ? ELSE postcondition_hash END,
                     recovery_status = CASE WHEN ? IS NOT NULL THEN ? ELSE recovery_status END,
                     completed_at = CASE WHEN ? IS NOT NULL THEN ? ELSE completed_at END,
+                    execution_attempt = CASE WHEN ? IS NOT NULL THEN ? ELSE execution_attempt END,
                     updated_at = ?
                 WHERE operation_id = ?
             """,
@@ -265,6 +293,8 @@ class RunStore:
                     recovery_status,
                     completed_at or now,
                     completed_at or now,
+                    execution_attempt,
+                    execution_attempt,
                     now,
                     operation_id,
                 ),

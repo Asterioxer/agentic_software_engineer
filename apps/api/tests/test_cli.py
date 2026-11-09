@@ -152,3 +152,25 @@ def test_cli_graph(tmp_path: Path) -> None:
     # Blast radius on mod_a.py
     code = main(["graph", str(tmp_path), "--target", "mod_a.py"])
     assert code == 0
+
+
+def test_cli_cancel(tmp_path: Path) -> None:
+    db_path = str(tmp_path / "cancel_test.db")
+    store = RunStore(db_path)
+    task = TaskSpec(
+        title="Pending Task",
+        description="Task to be cancelled",
+        repository=str(tmp_path),
+        dry_run=False,
+        auto_approve=False,
+    )
+    run = AgentRun(task, build_default_registry(), ToolPolicy(), store=store)
+    run.execute()
+
+    code = main(["cancel", run.run_id, "--reason", "Manual stop", "--db", db_path])
+    assert code == 0
+
+    checkpoint = store.get_checkpoint(run.run_id)
+    assert checkpoint is not None
+    assert checkpoint.cancellation_requested is True
+    assert checkpoint.status == RunStatus.FAILED

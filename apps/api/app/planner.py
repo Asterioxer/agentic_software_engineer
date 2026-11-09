@@ -22,10 +22,15 @@ def build_deterministic_plan(
             expected_outputs=["normalized_intent", "task_scope"],
             validation_criteria=["Task title and description are bounded and validated."],
             success_criteria=["Concrete task intent exists."],
+            depends_on=[],
+            preconditions=["task_title_valid", "task_description_valid"],
+            postconditions=["normalized_intent_available"],
             status=StepStatus.PENDING,
             requires_approval=False,
         )
     ]
+
+    last_step_id = "understand"
 
     if task.repository:
         count = repository_summary.get("file_count", 0) if repository_summary else 0
@@ -38,10 +43,14 @@ def build_deterministic_plan(
                 expected_outputs=["repository_metadata", "relevant_snippets", "languages"],
                 validation_criteria=["Repository context is bounded and accessible."],
                 success_criteria=["Repository context is bounded and available."],
+                depends_on=[last_step_id],
+                preconditions=["workspace_directory_exists"],
+                postconditions=["repository_summary_available"],
                 status=StepStatus.PENDING,
                 requires_approval=False,
             )
         )
+        last_step_id = "inspect"
 
     # Mutation step
     is_real_mutation = not task.dry_run
@@ -63,6 +72,9 @@ def build_deterministic_plan(
                 "Action kind is allowlisted.",
             ],
             success_criteria=["Actions are explicit and bounded."],
+            depends_on=[last_step_id],
+            preconditions=["workspace_directory_exists", "approval_granted_if_required"],
+            postconditions=["mutation_applied_or_previewed", "checksum_verified"],
             status=StepStatus.PENDING,
             requires_approval=is_real_mutation and not task.auto_approve,
         )
@@ -78,6 +90,9 @@ def build_deterministic_plan(
             expected_outputs=["verification_evidence", "gate_status"],
             validation_criteria=["All verification gates evaluate to true."],
             success_criteria=["Mandatory checks pass."],
+            depends_on=["implement"],
+            preconditions=["implementation_step_completed"],
+            postconditions=["independent_verification_passed"],
             status=StepStatus.PENDING,
             requires_approval=False,
         )

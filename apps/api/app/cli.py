@@ -148,6 +148,18 @@ def cmd_resume(args: argparse.Namespace) -> int:
         return 1
 
 
+def cmd_cancel(args: argparse.Namespace) -> int:
+    store = RunStore(args.db) if args.db else get_default_store()
+    checkpoint = store.cancel_run(args.run_id, reason=args.reason)
+    if not checkpoint:
+        print(f"Error: Run '{args.run_id}' not found.")
+        return 1
+    print(f"\n[Run Cancelled: {args.run_id}]")
+    print(f"Reason: {args.reason}")
+    print("Status: FAILED (CANCELLED)")
+    return 0
+
+
 def cmd_benchmark(args: argparse.Namespace) -> int:
     print("\n[Autonomous Coding Benchmark Suite V2]")
     evaluator = IndependentEvaluator(output_dir=args.out)
@@ -299,6 +311,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_resume.add_argument("--db", help="Path to SQLite database", default=None)
     p_resume.set_defaults(func=cmd_resume)
+
+    # cancel
+    p_cancel = subparsers.add_parser("cancel", help="Cancel an active or paused run")
+    p_cancel.add_argument("run_id", help="Run ID")
+    p_cancel.add_argument(
+        "--reason", help="Reason for cancellation", default="Operator requested cancellation"
+    )
+    p_cancel.add_argument("--db", help="Path to SQLite database", default=None)
+    p_cancel.set_defaults(func=cmd_cancel)
 
     # benchmark
     p_bench = subparsers.add_parser(

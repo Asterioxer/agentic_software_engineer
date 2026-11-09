@@ -46,6 +46,9 @@ class FailureCategory(str, Enum):
     DEPENDENCY_MISSING = "dependency_missing"
     SYNTAX_ERROR = "syntax_error"
     RECOVERY_REQUIRED = "recovery_required"
+    CANCELLED = "cancelled"
+    STRATEGY_LOOP = "strategy_loop"
+    APPROVAL_INVALIDATED = "approval_invalidated"
     UNKNOWN = "unknown"
 
 
@@ -70,10 +73,25 @@ class PlanStep(BaseModel):
     expected_outputs: list[str] = Field(default_factory=list)
     validation_criteria: list[str] = Field(default_factory=list)
     success_criteria: list[str] = Field(default_factory=list)
+    depends_on: list[str] = Field(default_factory=list)
+    preconditions: list[str] = Field(default_factory=list)
+    postconditions: list[str] = Field(default_factory=list)
     status: StepStatus = Field(default=StepStatus.PENDING)
     output: dict[str, Any] | None = None
     error: str | None = None
     requires_approval: bool = False
+    attempt: int = Field(default=1, ge=1)
+
+
+class ApprovalRequest(BaseModel):
+    plan_fingerprint: str
+    proposed_diff_hash: str | None = None
+    requested_at: str
+    approved: bool = False
+    approved_by: str | None = None
+    approved_at: str | None = None
+    invalidated: bool = False
+    invalidation_reason: str | None = None
 
 
 class JournalOperation(BaseModel):
@@ -106,6 +124,11 @@ class VerificationResult(BaseModel):
     check: str
     passed: bool
     detail: str
+    step_id: str | None = None
+    category: str = "general"
+    expected: str | None = None
+    actual: str | None = None
+    timestamp: str | None = None
 
 
 class RunEvent(BaseModel):
@@ -145,5 +168,7 @@ class RunCheckpoint(BaseModel):
     evidence_records: list[EvidenceRecord] = Field(default_factory=list)
     repository_summary: dict[str, Any] | None = None
     failure_diagnosis: FailureDiagnosis | None = None
+    approval_request: ApprovalRequest | None = None
+    cancellation_requested: bool = False
     created_at: str | None = None
     updated_at: str | None = None

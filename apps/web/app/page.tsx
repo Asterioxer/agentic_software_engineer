@@ -24,6 +24,10 @@ interface StepItem {
   validation_criteria?: string[];
   inputs?: Record<string, unknown>;
   requires_approval?: boolean;
+  depends_on?: string[];
+  preconditions?: string[];
+  postconditions?: string[];
+  attempt?: number;
 }
 
 interface ToolRecord {
@@ -71,6 +75,15 @@ interface RepositorySummary {
   test_mappings?: Record<string, string[]>;
 }
 
+interface ApprovalRequest {
+  plan_fingerprint: string;
+  proposed_diff_hash: string;
+  requested_at: string;
+  approved: boolean;
+  invalidated: boolean;
+  invalidation_reason?: string | null;
+}
+
 interface RunResult {
   run_id?: string;
   status: string;
@@ -82,6 +95,8 @@ interface RunResult {
   evidence_records?: EvidenceRecord[];
   failure_diagnosis?: FailureDiagnosis | null;
   operations?: JournalOperation[];
+  approval_request?: ApprovalRequest | null;
+  cancellation_requested?: boolean;
 }
 
 interface EvaluationResult {
@@ -356,6 +371,46 @@ export default function Home() {
       loadRuns();
     } catch (err) {
       alert(`Approval error: ${err}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function rejectRun() {
+    if (!result?.run_id) return;
+    setBusy(true);
+    try {
+      const res = await fetch(`${API}/api/v1/runs/${result.run_id}/resume`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ approved: false }),
+      });
+      const updated = await res.json();
+      setResult(updated);
+      loadRuns();
+    } catch (err) {
+      alert(`Rejection error: ${err}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function cancelRun() {
+    if (!result?.run_id) return;
+    setBusy(true);
+    try {
+      await fetch(`${API}/api/v1/runs/${result.run_id}/cancel`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ reason: "Operator cancelled run via Web UI" }),
+      });
+      const detailRes = await fetch(`${API}/api/v1/runs/${result.run_id}`);
+      if (detailRes.ok) {
+        setResult(await detailRes.json());
+      }
+      loadRuns();
+    } catch (err) {
+      alert(`Cancellation error: ${err}`);
     } finally {
       setBusy(false);
     }
@@ -682,14 +737,33 @@ export default function Home() {
                 {result.status === "awaiting_approval" && (
                   <div className="approval-banner">
                     <div>
-                      <strong>Operator Approval Required</strong>
-                      <p>
+                      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                        <span style={{ background: "#f59e0b", color: "#000", fontWeight: 700, fontSize: 11, padding: "2px 6px", borderRadius: 4 }}>
+                          GATE ENFORCED
+                        </span>
+                        <strong>Operator Approval Required</strong>
+                      </div>
+                      <p style={{ margin: "6px 0 0", color: "#94a3b8", fontSize: 12 }}>
                         A mutating workspace action has been proposed and halted at the execution boundary. Operator approval will execute bounded changes.
                       </p>
+                      {result.approval_request && (
+                        <div style={{ fontSize: 11, fontFamily: "monospace", color: "#64748b", marginTop: 6, display: "flex", gap: 12, flexWrap: "wrap" }}>
+                          <span>Fingerprint: <code style={{ color: "#38bdf8" }}>{result.approval_request.plan_fingerprint.slice(0, 16)}...</code></span>
+                          <span>Diff Hash: <code style={{ color: "#a78bfa" }}>{result.approval_request.proposed_diff_hash.slice(0, 16)}...</code></span>
+                        </div>
+                      )}
                     </div>
-                    <div className="approval-actions">
+                    <div className="approval-actions" style={{ display: "flex", gap: 8 }}>
                       <button type="button" onClick={approveAndResume} disabled={busy}>
                         {busy ? "Applying..." : "Approve & Execute"}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={rejectRun}
+                        disabled={busy}
+                        style={{ background: "#dc2626", color: "#fff", border: "none", padding: "6px 12px", borderRadius: 4, cursor: "pointer", fontSize: 12, fontWeight: 600 }}
+                      >
+                        {busy ? "Rejecting..." : "Reject"}
                       </button>
                     </div>
                   </div>
@@ -714,13 +788,25 @@ export default function Home() {
                       <span style={{ width: 8, height: 8, borderRadius: "50%", background: isStreaming ? "#10b981" : "#64748b" }} />
                       REAL-TIME DUPLEX TELEMETRY & CONSOLE {isStreaming && "(LIVE STREAMING)"}
                     </span>
-                    <button
-                      type="button"
-                      onClick={() => setLiveLogs([])}
-                      style={{ fontSize: 11, padding: "2px 8px", background: "#1e293b", color: "#94a3b8", border: "none", borderRadius: 4, cursor: "pointer" }}
-                    >
-                      Clear Console
-                    </button>
+                    <div style={{ display: "flex", gap: 6 }}>
+                      {!["completed", "failed"].includes(result.status || "") && (
+                        <button
+                          type="button"
+                          onClick={cancelRun}
+                          disabled={busy}
+                          style={{ fontSize: 11, padding: "2px 8px", background: "#7f1d1d", color: "#fca5a5", border: "1px solid #dc2626", borderRadius: 4, cursor: "pointer" }}
+                        >
+                          Cancel Run
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => setLiveLogs([])}
+                        style={{ fontSize: 11, padding: "2px 8px", background: "#1e293b", color: "#94a3b8", border: "none", borderRadius: 4, cursor: "pointer" }}
+                      >
+                        Clear Console
+                      </button>
+                    </div>
                   </div>
                   <div style={{ maxHeight: 180, overflowY: "auto", fontFamily: "monospace", fontSize: 11, color: "#a5f3fc", lineHeight: 1.6, padding: "6px 8px", background: "#020408", borderRadius: 4 }}>
                     {liveLogs.length === 0 ? (
@@ -770,6 +856,21 @@ export default function Home() {
                             <span className={`status ${s.status ?? "pending"}`}>{s.status ?? "pending"}</span>
                           </div>
                           <p style={{ margin: "4px 0 0", color: "#94a3b8", fontSize: 12 }}>{s.description}</p>
+                          {s.depends_on && s.depends_on.length > 0 && (
+                            <div style={{ fontSize: 11, color: "#38bdf8", marginTop: 4 }}>
+                              Prerequisites: {s.depends_on.join(", ")}
+                            </div>
+                          )}
+                          {s.preconditions && s.preconditions.length > 0 && (
+                            <div style={{ fontSize: 11, color: "#a78bfa", marginTop: 2 }}>
+                              Preconditions: {s.preconditions.join(" · ")}
+                            </div>
+                          )}
+                          {s.postconditions && s.postconditions.length > 0 && (
+                            <div style={{ fontSize: 11, color: "#34d399", marginTop: 2 }}>
+                              Postconditions: {s.postconditions.join(" · ")}
+                            </div>
+                          )}
                           {s.validation_criteria && (
                             <div style={{ fontSize: 11, color: "#64748b", marginTop: 4 }}>
                               Criteria: {s.validation_criteria.join(" · ")}

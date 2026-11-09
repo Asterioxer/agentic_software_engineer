@@ -76,6 +76,11 @@ class RunRequest(BaseModel):
 
 class ResumeRequest(BaseModel):
     approved: bool = Field(default=False)
+    plan_fingerprint: str | None = Field(default=None)
+
+
+class CancelRequest(BaseModel):
+    reason: str = Field(default="Operator requested cancellation", max_length=200)
 
 
 class DiffRequest(BaseModel):
@@ -224,9 +229,15 @@ async def websocket_run_endpoint(websocket: WebSocket, run_id: str) -> None:
                         "status": res.get("status"),
                     }
                 )
-            elif action == "reject":
+            elif action == "cancel":
+                checkpoint = _store.cancel_run(run_id, reason="Cancelled via WebSocket")
+                bus.publish(
+                    run_id=run_id,
+                    event_type="status:failed",
+                    payload={"status": "failed", "message": "Cancelled via WebSocket"},
+                )
                 await websocket.send_json(
-                    {"event_type": "action_result", "action": "reject", "status": "rejected"}
+                    {"event_type": "action_result", "action": "cancel", "status": "cancelled"}
                 )
                 break
             elif action == "steer":
@@ -261,9 +272,25 @@ def resume(run_id: str, request: ResumeRequest) -> dict[str, object]:
             registry=_registry,
             policy=_policy,
             store=_store,
+            expected_fingerprint=request.plan_fingerprint,
         )
     except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/v1/runs/{run_id}/cancel")
+def cancel_run_endpoint(run_id: str, request: CancelRequest | None = None) -> dict[str, Any]:
+    reason = request.reason if request else "Operator requested cancellation"
+    checkpoint = _store.cancel_run(run_id, reason=reason)
+    if not checkpoint:
+        raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found.")
+    bus = get_event_bus()
+    bus.publish(
+        run_id=run_id,
+        event_type="status:failed",
+        payload={"status": "failed", "message": f"Cancelled: {reason}"},
+    )
+    return {"run_id": run_id, "status": "failed", "cancelled": True, "reason": reason}
 
 
 @app.post("/api/v1/analyze-diff")
