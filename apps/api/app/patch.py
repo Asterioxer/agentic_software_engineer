@@ -145,17 +145,76 @@ def apply_hunks_to_lines(
 class PatchApplier:
     """Atomic multi-file unified diff applier with boundary protection and condition hashing."""
 
-    def __init__(self, root: str, dry_run: bool = True) -> None:
+    def __init__(self, root: str | Path, dry_run: bool = True) -> None:
         self.root = Path(root).resolve()
         self.dry_run = dry_run
 
     def _safe_target(self, relative_path: str) -> Path:
-        normalized = relative_path.replace("\\", "/").strip().lstrip("/")
-        if not normalized or normalized.startswith(("/", "\\")) or ".." in normalized.split("/"):
+        if "\0" in relative_path:
+            raise ValueError("Path contains null bytes.")
+
+        clean_rel = relative_path.replace("\\", "/").strip()
+
+        # Reject UNC paths
+        if clean_rel.startswith(("//", "\\\\")):
+            raise ValueError("UNC paths are not permitted in patch targets.")
+
+        # Reject Windows drive letter prefixes
+        if len(clean_rel) > 1 and clean_rel[1] == ":":
+            raise ValueError("Absolute drive paths are not permitted in patch targets.")
+
+        # Reject NTFS alternate data streams
+        if ":" in clean_rel:
+            raise ValueError("Alternate data streams are not permitted in patch targets.")
+
+        # Disallow root overrides
+        if clean_rel.startswith(("/", "\\")):
+            clean_rel = clean_rel.lstrip("/\\")
+
+        # Disallow directory traversal sequences
+        if ".." in clean_rel.split("/"):
             raise ValueError(f"Path traversal attempted in patch target: {relative_path}")
-        target = (self.root / normalized).resolve()
-        if target != self.root and self.root not in target.parents:
-            raise ValueError(f"Target '{relative_path}' escapes workspace boundary {self.root}")
+
+        unresolved = self.root / clean_rel
+        if unresolved.is_symlink():
+            raise ValueError(
+                f"Patch target is a symlink, which is not permitted for modification: {relative_path}"
+            )
+
+        target = unresolved.resolve()
+
+        # Strict containment check
+        try:
+            rel_path = target.relative_to(self.root)
+        except ValueError as exc:
+            raise ValueError(
+                f"Patch target '{relative_path}' escapes workspace boundary {self.root}"
+            ) from exc
+
+        # Disallow sensitive VCS/environment internals
+        forbidden_parts = {".git", ".env"}
+        if any(
+            part in forbidden_parts
+            or part.startswith((".git", ".env"))
+            or part.lower() in forbidden_parts
+            for part in rel_path.parts
+        ):
+            raise ValueError(
+                "Patch target attempts to modify forbidden VCS internals or environment files."
+            )
+
+        # Verify ancestor symlinks do not escape root
+        curr = target.parent
+        while curr != self.root and curr.parent != curr:
+            if curr.is_symlink():
+                try:
+                    curr.resolve().relative_to(self.root)
+                except ValueError as exc:
+                    raise ValueError(
+                        f"Patch target follows symlink escaping workspace: {relative_path}"
+                    ) from exc
+            curr = curr.parent
+
         return target
 
     def apply_diff(self, diff_text: str) -> PatchResult:

@@ -86,7 +86,10 @@ class PlanStep(BaseModel):
 class ApprovalRequest(BaseModel):
     plan_fingerprint: str
     proposed_diff_hash: str | None = None
+    workspace_pre_state_hash: str | None = None
+    target_files: list[str] = Field(default_factory=list)
     requested_at: str
+    expires_at: str | None = None
     approved: bool = False
     approved_by: str | None = None
     approved_at: str | None = None

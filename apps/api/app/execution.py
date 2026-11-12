@@ -41,7 +41,7 @@ class WorkspaceExecutor:
     It is NOT an OS-level sandbox. Untrusted code should be run in a disposable container.
     """
 
-    def __init__(self, root: str, dry_run: bool = True) -> None:
+    def __init__(self, root: str | Path, dry_run: bool = True) -> None:
         self.root = Path(root).resolve()
         self.dry_run = dry_run
 
@@ -67,7 +67,11 @@ class WorkspaceExecutor:
         if clean_rel.startswith(("/", "\\")):
             clean_rel = clean_rel.lstrip("/\\")
 
-        target = (self.root / clean_rel).resolve()
+        unresolved = self.root / clean_rel
+        if unresolved.is_symlink():
+            raise ValueError("Direct modification of symbolic links is forbidden.")
+
+        target = unresolved.resolve()
 
         # Strict containment check (resolves symlinks and directory junctions)
         try:
@@ -87,6 +91,18 @@ class WorkspaceExecutor:
             raise ValueError(
                 "Direct modification of VCS internals or environment files is forbidden."
             )
+
+        # Verify ancestor symlinks do not escape root
+        curr = target.parent
+        while curr != self.root and curr.parent != curr:
+            if curr.is_symlink():
+                try:
+                    curr.resolve().relative_to(self.root)
+                except ValueError as exc:
+                    raise ValueError(
+                        "Workspace path follows symlink escaping repository root."
+                    ) from exc
+            curr = curr.parent
 
         return target
 

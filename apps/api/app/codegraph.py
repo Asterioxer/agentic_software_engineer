@@ -100,8 +100,19 @@ class CodeGraph:
                 for alias in node.names:
                     self.imports[rel_path].add(alias.name)
             elif isinstance(node, ast.ImportFrom):
-                mod = node.module or ""
-                self.imports[rel_path].add(mod)
+                if node.level > 0:
+                    rel_dir = Path(rel_path).parent
+                    for _ in range(node.level - 1):
+                        rel_dir = rel_dir.parent
+                    if node.module:
+                        resolved_rel = (rel_dir / node.module.replace(".", "/")).as_posix()
+                        self.imports[rel_path].add(resolved_rel)
+                    else:
+                        for alias in node.names:
+                            self.imports[rel_path].add((rel_dir / alias.name).as_posix())
+                else:
+                    mod = node.module or ""
+                    self.imports[rel_path].add(mod)
                 for alias in node.names:
                     self.call_references[alias.name].add(rel_path)
             elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
@@ -132,6 +143,11 @@ class CodeGraph:
             file_map[stem.replace("/", ".")] = f
             # Also base stem
             file_map[Path(f).stem] = f
+            # If __init__.py, also map package directory
+            if Path(f).name == "__init__.py":
+                pkg_dir = Path(f).parent.as_posix()
+                file_map[pkg_dir] = f
+                file_map[pkg_dir.replace("/", ".")] = f
 
         for src, raw_imports in self.imports.items():
             for imp in raw_imports:
@@ -214,3 +230,73 @@ class CodeGraph:
             "unique_symbols": len(self.definitions),
             "dependency_edges": total_edges,
         }
+
+    def detect_cycles(self) -> list[list[str]]:
+        """Detect circular dependency cycles between indexed source files.
+
+        Returns a sorted list of unique cycle loops, e.g. [['a.py', 'b.py', 'a.py']].
+        """
+        if not self._built:
+            self.build()
+
+        cycles: set[tuple[str, ...]] = set()
+
+        def dfs(current: str, path: list[str], visited_in_path: set[str]) -> None:
+            path.append(current)
+            visited_in_path.add(current)
+
+            for neighbor in sorted(self.file_dependencies.get(current, set())):
+                if neighbor in visited_in_path:
+                    cycle_start_idx = path.index(neighbor)
+                    cycle_nodes = path[cycle_start_idx:]
+                    if len(cycle_nodes) > 1:
+                        min_idx = cycle_nodes.index(min(cycle_nodes))
+                        canonical = cycle_nodes[min_idx:] + cycle_nodes[:min_idx]
+                        cycles.add(tuple(canonical + [canonical[0]]))
+                elif neighbor not in path:
+                    dfs(neighbor, path, visited_in_path)
+
+            visited_in_path.remove(current)
+            path.pop()
+
+        for node in sorted(self.files_indexed):
+            dfs(node, [], set())
+
+        return [list(c) for c in sorted(cycles)]
+
+    def find_orphan_files(self, ignore_entrypoints: bool = True) -> list[str]:
+        """Find source files that are never imported or depended upon by any other file."""
+        if not self._built:
+            self.build()
+
+        orphans: list[str] = []
+        entrypoint_names = {
+            "main.py",
+            "__main__.py",
+            "__init__.py",
+            "cli.py",
+            "wsgi.py",
+            "asgi.py",
+            "index.ts",
+            "index.tsx",
+            "index.js",
+            "index.jsx",
+            "page.tsx",
+            "layout.tsx",
+            "route.ts",
+        }
+
+        for f in sorted(self.files_indexed):
+            if len(self.file_dependents.get(f, set())) > 0:
+                continue
+
+            if ignore_entrypoints:
+                fname = Path(f).name.lower()
+                if fname in entrypoint_names:
+                    continue
+                if "test" in fname or "tests/" in f.lower() or "__tests__" in f.lower():
+                    continue
+
+            orphans.append(f)
+
+        return orphans

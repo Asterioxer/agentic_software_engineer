@@ -4,7 +4,7 @@ import hashlib
 import json
 import threading
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +25,7 @@ from .domain import (
     VerificationResult,
 )
 from .execution import WorkspaceAction, WorkspaceExecutor, compute_file_hash
+from .patch import parse_unified_diff
 from .planner import plan_with_repository
 from .policy import ToolPolicy
 from .reflection import classify_failure, reflect
@@ -65,6 +66,38 @@ def extract_proposed_diff(plan: list[PlanStep], repo_root: str | None = None) ->
         elif step.tool == "workspace.patch" and step.inputs.get("patch"):
             diffs.append(str(step.inputs["patch"]))
     return "\n".join(diffs)
+
+
+def extract_target_files(plan: list[PlanStep]) -> list[str]:
+    """Extract list of target files that will be mutated by steps in the plan."""
+    targets: set[str] = set()
+    for step in plan:
+        if step.tool == "workspace.plan" and step.inputs.get("path"):
+            targets.add(str(step.inputs["path"]).replace("\\", "/"))
+        elif step.tool == "workspace.patch" and step.inputs.get("patch"):
+            try:
+                for p in parse_unified_diff(str(step.inputs["patch"])):
+                    for path_str in (p.target_path, p.source_path):
+                        if path_str and path_str != "/dev/null":
+                            targets.add(path_str.replace("\\", "/"))
+            except (ValueError, TypeError, KeyError):
+                continue
+        elif step.inputs.get("path"):
+            targets.add(str(step.inputs["path"]).replace("\\", "/"))
+        elif step.inputs.get("file"):
+            targets.add(str(step.inputs["file"]).replace("\\", "/"))
+    return sorted({f.lstrip("/\\") for f in targets if f and f != "/dev/null"})
+
+
+def compute_workspace_pre_state_hash(target_files: list[str], repo_root: str | None = None) -> str:
+    """Compute cryptographic hash of target files' current on-disk pre-state to prevent TOCTOU attacks."""
+    root = Path(repo_root) if repo_root else Path.cwd()
+    entries: list[str] = []
+    for rel in sorted(target_files):
+        target = (root / rel).resolve()
+        entries.append(f"{rel}:{compute_file_hash(target)}")
+    payload = "\n".join(entries)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 class AgentRun:
@@ -334,12 +367,20 @@ class AgentRun:
             now_iso = datetime.now(UTC).isoformat()
 
             if step.requires_approval and not auto_approved and not self.task.auto_approve:
+                target_files = extract_target_files(plan)
+                pre_state_hash = compute_workspace_pre_state_hash(
+                    target_files, self.task.repository
+                )
+                expires_at = (datetime.now(UTC) + timedelta(seconds=3600)).isoformat()
                 self.checkpoint.approval_request = ApprovalRequest(
                     plan_fingerprint=fingerprint,
                     proposed_diff_hash=hashlib.sha256(diff_text.encode("utf-8")).hexdigest()
                     if diff_text
                     else None,
+                    workspace_pre_state_hash=pre_state_hash,
+                    target_files=target_files,
                     requested_at=now_iso,
+                    expires_at=expires_at,
                     approved=False,
                 )
                 self._emit(
@@ -350,7 +391,37 @@ class AgentRun:
                 return self._build_response(RunStatus.AWAITING_APPROVAL)
 
             # Cryptographic Approval Invalidation Check
-            if auto_approved and self.checkpoint.approval_request:
+            if (
+                auto_approved
+                and self.checkpoint.approval_request
+                and not self.checkpoint.approval_request.approved
+            ):
+                # 1. Approval TTL Expiration Check
+                if self.checkpoint.approval_request.expires_at:
+                    try:
+                        exp_dt = datetime.fromisoformat(self.checkpoint.approval_request.expires_at)
+                        if datetime.now(UTC) > exp_dt:
+                            self.checkpoint.approval_request.invalidated = True
+                            self.checkpoint.approval_request.invalidation_reason = (
+                                "Approval request has expired."
+                            )
+                            diag = FailureDiagnosis(
+                                category=FailureCategory.APPROVAL_INVALIDATED,
+                                message="Approval request has expired (TTL exceeded).",
+                                recoverable=True,
+                                suggested_recovery="Review updated plan and grant renewed operator approval.",
+                            )
+                            self.checkpoint.failure_diagnosis = diag
+                            self._emit(
+                                RunStatus.FAILED,
+                                "Approval Invalidated: Approval TTL exceeded.",
+                            )
+                            self._save_checkpoint()
+                            return self._build_response(RunStatus.FAILED)
+                    except ValueError:
+                        pass
+
+                # 2. Plan Fingerprint Check
                 current_fingerprint = compute_plan_fingerprint(plan, diff_text=diff_text)
                 if current_fingerprint != self.checkpoint.approval_request.plan_fingerprint:
                     self.checkpoint.approval_request.invalidated = True
@@ -370,6 +441,32 @@ class AgentRun:
                     )
                     self._save_checkpoint()
                     return self._build_response(RunStatus.FAILED)
+
+                # 3. TOCTOU Workspace Pre-State Check
+                if self.checkpoint.approval_request.workspace_pre_state_hash is not None:
+                    current_pre_state = compute_workspace_pre_state_hash(
+                        self.checkpoint.approval_request.target_files,
+                        self.task.repository,
+                    )
+                    if (
+                        current_pre_state
+                        != self.checkpoint.approval_request.workspace_pre_state_hash
+                    ):
+                        self.checkpoint.approval_request.invalidated = True
+                        self.checkpoint.approval_request.invalidation_reason = "TOCTOU divergence: target files were modified on disk after approval was requested."
+                        diag = FailureDiagnosis(
+                            category=FailureCategory.APPROVAL_INVALIDATED,
+                            message="Approval invalidated: target workspace files modified after approval requested (TOCTOU).",
+                            recoverable=True,
+                            suggested_recovery="Review workspace modifications and grant renewed operator approval.",
+                        )
+                        self.checkpoint.failure_diagnosis = diag
+                        self._emit(
+                            RunStatus.FAILED,
+                            "Approval Invalidated: TOCTOU workspace pre-state divergence detected.",
+                        )
+                        self._save_checkpoint()
+                        return self._build_response(RunStatus.FAILED)
 
                 self.checkpoint.approval_request.approved = True
                 self.checkpoint.approval_request.approved_at = now_iso
@@ -705,6 +802,28 @@ def resume_run(
             runner._emit(RunStatus.FAILED, "Operator rejected proposed workspace mutations.")
             return runner._build_response(RunStatus.FAILED)
 
+        # Approval TTL expiration check
+        if checkpoint.approval_request and checkpoint.approval_request.expires_at:
+            try:
+                exp_dt = datetime.fromisoformat(checkpoint.approval_request.expires_at)
+                if datetime.now(UTC) > exp_dt:
+                    checkpoint.approval_request.invalidated = True
+                    checkpoint.approval_request.invalidation_reason = (
+                        "Approval request has expired."
+                    )
+                    checkpoint.status = RunStatus.FAILED
+                    checkpoint.failure_diagnosis = FailureDiagnosis(
+                        category=FailureCategory.APPROVAL_INVALIDATED,
+                        message="Approval request has expired (TTL exceeded).",
+                        recoverable=True,
+                        suggested_recovery="Review updated plan and grant renewed operator approval.",
+                    )
+                    effective_store.save_checkpoint(checkpoint)
+                    raise ValueError("Approval request has expired.")
+            except ValueError as ve:
+                if str(ve) == "Approval request has expired.":
+                    raise
+
         # Fingerprint check if provided
         if (
             expected_fingerprint
@@ -715,6 +834,28 @@ def resume_run(
             checkpoint.approval_request.invalidation_reason = f"Provided approval fingerprint '{expected_fingerprint}' does not match stored fingerprint."
             effective_store.save_checkpoint(checkpoint)
             raise ValueError("Approval fingerprint mismatch. Plan may have changed.")
+
+        # TOCTOU pre-state check
+        if (
+            checkpoint.approval_request
+            and checkpoint.approval_request.workspace_pre_state_hash is not None
+        ):
+            current_pre_state = compute_workspace_pre_state_hash(
+                checkpoint.approval_request.target_files,
+                checkpoint.task.repository,
+            )
+            if current_pre_state != checkpoint.approval_request.workspace_pre_state_hash:
+                checkpoint.approval_request.invalidated = True
+                checkpoint.approval_request.invalidation_reason = "TOCTOU divergence: target files were modified on disk after approval was requested."
+                checkpoint.status = RunStatus.FAILED
+                checkpoint.failure_diagnosis = FailureDiagnosis(
+                    category=FailureCategory.APPROVAL_INVALIDATED,
+                    message="Approval invalidated: target workspace files modified after approval requested (TOCTOU).",
+                    recoverable=True,
+                    suggested_recovery="Review workspace modifications and grant renewed operator approval.",
+                )
+                effective_store.save_checkpoint(checkpoint)
+                raise ValueError("TOCTOU workspace divergence detected.")
 
         from .policy import ToolPolicy
         from .tools import build_default_registry
